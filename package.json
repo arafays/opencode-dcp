@@ -1,0 +1,62 @@
+{
+  "name": "opencode-dcp",
+  "version": "2.0.0-beta.1",
+  "description": "Dynamic Context Pruning (DCP) plugin for OpenCode V2 - model-driven context compression, tool-output pruning, and context-window nudges",
+  "type": "module",
+  "license": "MIT",
+  "author": "Abdul Rafay Shaikh <me@arafays.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arafays/opencode-dcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/arafays/opencode-dcp/issues"
+  },
+  "homepage": "https://github.com/arafays/opencode-dcp#readme",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "dcp",
+    "dynamic-context-pruning",
+    "context-compression",
+    "context-window",
+    "llm"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./tui": "./tui.tsx"
+  },
+  "files": [
+    "dist",
+    "tui.tsx",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "prepublishOnly": "npm run typecheck && npm run test && npm run build"
+  },
+  "dependencies": {
+    "@anthropic-ai/tokenizer": "^0.0.4",
+    "@opencode-ai/plugin": "beta",
+    "@opentui/core": "^0.5.6",
+    "@opentui/solid": "^0.5.6",
+    "solid-js": "^1.9.12"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "tsup": "^8.5.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

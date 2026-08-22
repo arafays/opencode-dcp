@@ -1,0 +1,28 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
+    {
+      "package": "../dist/index.js",
+      "options": {
+        "debug": true,
+        "maxContextLimit": "70000",
+        "strategies": {
+          "deduplication": {
+            "enabled": true
+          },
+          "purgeErrors": {
+            "enabled": true,
+            "turns": 4
+          }
+        }
+      }
+    }
+  ],
+  "references": {
+    "opencode-v2": {
+      "repository": "anomalyco/opencode",
+      "branch": "v2",
+      "description": "OpenCode V2 source code on the v2 branch: use for implementation details of server, plugins, and config"
+    }
+  }
+}

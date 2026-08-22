@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2023"],
+    "types": ["node"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "declaration": true,
+    "emitDeclarationOnly": false,
+    "noEmit": true,
+    "jsx": "preserve",
+    "jsxImportSource": "@opentui/solid"
+  },
+  "include": ["index.ts", "tui.tsx", "lib/**/*.ts", "test/**/*.ts"]
+}
