@@ -11,13 +11,19 @@ superseded tool outputs, and nudging when context pressure crosses a budget.
 
 ## Install
 
-**Local path** (this repo):
+```sh
+opencode2 plugin add opencode-dcp
+```
+
+This installs the package into OpenCode's plugin cache and registers it in your
+global config; the TUI module (`./tui`) is picked up automatically. Or add it
+directly to a project config:
 
 ```jsonc title=".opencode/opencode.json"
 {
   "plugins": [
     {
-      "package": "../dist/index.js",
+      "package": "opencode-dcp",
       "options": {
         "debug": false,
         "maxContextLimit": "70%"
@@ -27,9 +33,23 @@ superseded tool outputs, and nudging when context pressure crosses a budget.
 }
 ```
 
-Build first: `npm install && npm run build`.
+**Development** (this repo): build first (`npm install && npm run build`), then
+point config at the local entrypoint:
 
-**From npm** once published: `opencode2 plugin add opencode-dcp`.
+```jsonc title=".opencode/opencode.json"
+{
+  "plugins": [
+    {
+      "package": "../dist/index.js",
+      "options": { "tui": false }
+    }
+  ]
+}
+```
+
+> Requires OpenCode V2 (`opencode2`). The plugin API is beta; the package pins
+> `@opencode-ai/plugin@^0.0.0-beta-17887`. Republish compatible updates when the
+> V2 plugin contract changes.
 
 ## How it works
 
