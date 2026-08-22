@@ -2,7 +2,7 @@
 
 ## What this is
 
-OpenCode **V2** plugin (`@opencode-ai/plugin@beta`) implementing Dynamic Context Pruning. Entrypoint `index.ts` (`Plugin.define`); logic in `lib/` split as: `transcript/` (scan → mirror → edit pipeline), `state/store.ts` (persisted per-session state), `compress-tool.ts` (model-invoked `compress` tool), `prune.ts` + `strategies.ts`, `nudges.ts` + `events.ts` (usage event pump), `config.ts` (options resolution).
+OpenCode **V2** plugin implementing Dynamic Context Pruning. Entrypoint `index.ts` (`Plugin.define`); logic in `lib/` split as: `transcript/` (scan → mirror → edit pipeline), `state/store.ts` (persisted per-session state), `compress-tool.ts` (model-invoked `compress` tool), `prune.ts` + `strategies.ts`, `nudges.ts` + `events.ts` (usage event pump), `config.ts` (options resolution), `tui-bridge.ts` (stats snapshot writer). Published to npm as `opencode-dcp`; repo doubles as the plugin's own dev harness via `.opencode/opencode.json`.
 
 ## Commands
 
@@ -18,9 +18,20 @@ npm run build                              # tsup -> dist/
 - No lint/format config exists; typecheck + tests are the only gate.
 - `mise.toml` pins `aube` (an npm-alternative package manager), but the committed lockfile is npm's and all documented commands use npm.
 
-## Gotcha: rebuild before live testing
+## Gotchas
 
-`.opencode/opencode.json` loads the plugin from `../dist/index.js`. Source edits have no effect in an OpenCode session until you run `npm run build`. Note `dist/` is git-tracked, so builds dirty the tree.
+- **Rebuild before live testing**: `.opencode/opencode.json` loads the plugin from `../dist/index.js`. Source edits have no effect in an OpenCode session until `npm run build`. (`dist/` is gitignored, so builds stay out of commits.)
+- **Never `npm pack` before `npm publish`**: `prepublishOnly` re-runs the build with tsup `clean: true`, which **wipes `dist/`** — any tarball packed beforehand silently disappears. This broke CI once; `release.yml` packs *after* publishing for exactly this reason.
+- **Dependency pinning**: `@opencode-ai/plugin` is pinned to a caret beta range (e.g. `^0.0.0-beta-17887`), never the floating `beta` dist-tag — the tag jumps to incompatible API revisions. Bump deliberately when targeting a newer OpenCode beta.
+- **TUI option shape**: `tui` must be an object (`{ "enabled": false }`). A bare boolean used to crash `resolveOptions` (now warns + falls back, but don't reintroduce it in docs/examples).
+- **TUI companion auto-load requires a package install**: the OpenCode TUI only auto-loads a server plugin's `./tui` export when the plugin's source type is `package` (i.e. installed via `plugin add`). Local-path dev entries (`../dist/index.js`) don't get the sidebar/report.
+
+## Release flow
+
+Pushing a tag `v*` triggers `.github/workflows/release.yml`: verifies tag matches `package.json` version → typecheck/test/build → `npm publish --provenance` → GitHub release with the packed tarball. Requirements:
+
+- Repo secret `NPM_TOKEN` must be an **OTP-exempt** token (npm classic *Automation*, or granular with 2FA-bypass checked). A regular login token fails with `EOTP`.
+- To cut a release: bump version, commit, `git tag vX.Y.Z && git push origin vX.Y.Z`.
 
 ## Invariants
 
@@ -33,7 +44,7 @@ npm run build                              # tsup -> dist/
 
 ## Beta API
 
-The V2 plugin API is beta and moving between releases. When `@opencode-ai/plugin@beta` types disagree with runtime behavior, check the opencode-v2 source rather than trusting either alone. `index.ts` carries an arity-based `addTool` shim because `tools.add` changed signature across beta generations.
+The V2 plugin API is beta and moving between releases. When `@opencode-ai/plugin` types disagree with runtime behavior, check the opencode-v2 source rather than trusting either alone. `index.ts` carries an arity-based `addTool` shim because `tools.add` changed signature across beta generations.
 
 ## Reference repos (wired in `.opencode/opencode.json`)
 
