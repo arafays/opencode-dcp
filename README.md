@@ -15,8 +15,10 @@ superseded tool outputs, and nudging when context pressure crosses a budget.
 opencode2 plugin add opencode-dcp
 ```
 
-This installs the package into OpenCode's plugin cache and registers it in your
-global config; the TUI module (`./tui`) is picked up automatically. Or add it
+This installs the package into OpenCode's plugin cache and registers its server
+entrypoint in your global config. The TUI companion needs no extra step: the
+plugin's definition sets `tui: true`, so a locally connected TUI discovers the
+active plugin and loads its `./tui` export from the cache on its own. Or add it
 directly to a project config:
 
 ```jsonc title=".opencode/opencode.json"
@@ -41,11 +43,20 @@ point config at the local entrypoint:
   "plugins": [
     {
       "package": "../dist/index.js",
-      "options": { "tui": false }
+      "options": {
+        "debug": true,
+        "maxContextLimit": "70%",
+        "tui": { "enabled": false }
+      }
     }
   ]
 }
 ```
+
+Note: the automatic TUI companion load only applies to packages installed via
+`plugin add`. With a local-path entry like above, the sidebar/report stay off
+unless you separately register the TUI module (e.g. a `cli.json` `plugins`
+entry or a file under `~/.config/opencode/plugins/tui/`).
 
 > Requires OpenCode V2 (`opencode2`). The plugin API is beta; the package pins
 > `@opencode-ai/plugin@^0.0.0-beta-17887`. Republish compatible updates when the
@@ -90,13 +101,14 @@ A companion TUI module ships with the package and is **enabled by default**
 Mechanism: the server plugin writes a stats snapshot to the TUI's watched
 storage file (`~/.local/state/opencode/<channel>/tui/plugin.opencode.dcp.tui.stats.json`)
 after every dispatch and compression; the TUI module reads it as a reactive
-store, so numbers update live. Disable the whole thing with:
+store, so numbers update live. Disabling stops stats writes and quiets the
+panel:
 
 ```jsonc
 {
   "plugins": [
     {
-      "package": "../dist/index.js",
+      "package": "opencode-dcp",
       "options": { "tui": { "enabled": false } }
     }
   ]

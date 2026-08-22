@@ -33,13 +33,18 @@ jobs:
       - run: npm test
       - run: npm run build
 
-      - name: Pack tarball
-        run: npm pack --pack-destination dist
-
+      # Publish first: `prepublishOnly` re-runs the build with tsup clean:true,
+      # which would wipe any tarball packed beforehand.
       - name: Publish to npm (with provenance)
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Pack tarball
+        run: |
+          npm pack --pack-destination dist
+          TARBALL="dist/opencode-dcp-$(node -p "require('./package.json').version").tgz"
+          test -f "$TARBALL" || { echo "::error::expected $TARBALL"; ls -la dist/; exit 1; }
 
       - name: Create GitHub release
         env:
@@ -50,4 +55,4 @@ jobs:
             --verify-tag \
             --generate-notes \
             --title "opencode-dcp ${GITHUB_REF_NAME#v}" \
-            dist/opencode-dcp-*.tgz
+            "dist/opencode-dcp-$(node -p "require('./package.json').version").tgz"

@@ -100,7 +100,12 @@ export function resolveOptions(options: PluginOptions | undefined, warn: (msg: s
   const strategiesInput = (input.strategies ?? {}) as Record<string, Record<string, unknown>>
   const dedupeInput = strategiesInput.deduplication ?? {}
   const purgeInput = strategiesInput.purgeErrors ?? {}
-  const tuiInput = (input.tui ?? {}) as Record<string, unknown>
+  if (input.tui !== undefined && (typeof input.tui !== "object" || input.tui === null)) {
+    warn(`option "tui" must be an object like { "enabled": false }; invalid value ignored`)
+  }
+  const tuiInput = (
+    typeof input.tui === "object" && input.tui !== null ? input.tui : {}
+  ) as Record<string, unknown>
 
   return {
     enabled: typeof input.enabled === "boolean" ? input.enabled : DEFAULTS.enabled,
