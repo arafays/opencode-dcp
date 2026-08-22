@@ -22,7 +22,7 @@ npm run build                              # tsup -> dist/
 
 - **Rebuild before live testing**: `.opencode/opencode.json` loads the plugin from `../dist/index.js`. Source edits have no effect in an OpenCode session until `npm run build`. (`dist/` is gitignored, so builds stay out of commits.)
 - **Never `npm pack` before `npm publish`**: `prepublishOnly` re-runs the build with tsup `clean: true`, which **wipes `dist/`** — any tarball packed beforehand silently disappears. This broke CI once; `release.yml` packs *after* publishing for exactly this reason.
-- **Dependency pinning**: `@opencode-ai/plugin` is pinned to a caret beta range (e.g. `^0.0.0-beta-17887`), never the floating `beta` dist-tag — the tag jumps to incompatible API revisions. Bump deliberately when targeting a newer OpenCode beta.
+- **Dependency pinning**: `@opencode-ai/plugin` is pinned **exactly** (e.g. `0.0.0-beta-17887`), never with a caret and never the floating `beta` dist-tag — npm resolves any lexically-greater `0.0.0-*` prerelease tag (`windows-fix`, `snapshot-*`, …) as satisfying a caret range over a beta, and those builds lack the `Plugin` export. Bump deliberately when targeting a newer OpenCode beta.
 - **TUI option shape**: `tui` must be an object (`{ "enabled": false }`). A bare boolean used to crash `resolveOptions` (now warns + falls back, but don't reintroduce it in docs/examples).
 - **TUI companion auto-load requires a package install**: the OpenCode TUI only auto-loads a server plugin's `./tui` export when the plugin's source type is `package` (i.e. installed via `plugin add`). Local-path dev entries (`../dist/index.js`) don't get the sidebar/report.
 

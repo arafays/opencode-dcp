@@ -1,6 +1,6 @@
 {
   "name": "opencode-dcp",
-  "version": "2.0.0-beta.2",
+  "version": "2.0.0-beta.3",
   "description": "Dynamic Context Pruning (DCP) plugin for OpenCode V2 - model-driven context compression, tool-output pruning, and context-window nudges",
   "type": "module",
   "license": "MIT",
@@ -45,7 +45,7 @@
   },
   "dependencies": {
     "@anthropic-ai/tokenizer": "^0.0.4",
-    "@opencode-ai/plugin": "^0.0.0-beta-17887",
+    "@opencode-ai/plugin": "0.0.0-beta-17887",
     "@opentui/core": "^0.5.6",
     "@opentui/solid": "^0.5.6",
     "solid-js": "^1.9.12"

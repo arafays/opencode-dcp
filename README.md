@@ -59,7 +59,9 @@ unless you separately register the TUI module (e.g. a `cli.json` `plugins`
 entry or a file under `~/.config/opencode/plugins/tui/`).
 
 > Requires OpenCode V2 (`opencode2`). The plugin API is beta; the package pins
-> `@opencode-ai/plugin@^0.0.0-beta-17887`. Republish compatible updates when the
+> `@opencode-ai/plugin@0.0.0-beta-17887` **exactly** (a caret range over a
+> prerelease admits any lexically-greater junk tag, e.g. `windows-fix`, which
+> breaks resolution). Republish compatible updates when the
 > V2 plugin contract changes.
 
 ## How it works
