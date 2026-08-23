@@ -21,8 +21,9 @@ npm run build                              # tsup -> dist/
 ## Gotchas
 
 - **Rebuild before live testing**: `.opencode/opencode.json` loads the plugin from `../dist/index.js`. Source edits have no effect in an OpenCode session until `npm run build`. (`dist/` is gitignored, so builds stay out of commits.)
-- **Never `npm pack` before `npm publish`**: `prepublishOnly` re-runs the build with tsup `clean: true`, which **wipes `dist/`** — any tarball packed beforehand silently disappears. This broke CI once; `release.yml` packs *after* publishing for exactly this reason.
+- **Never `npm pack` before `npm publish`**: `prepublishOnly` re-runs the build with tsup `clean: true`, which **wipes `dist/`** — any tarball packed beforehand silently disappears. This broke CI once; `release.yml` builds explicitly and publishes with `--ignore-scripts`, so `prepublishOnly` never fires in CI — keep packing *after* publishing anyway.
 - **Dependency pinning**: `@opencode-ai/plugin` is pinned **exactly** (e.g. `0.0.0-beta-17887`), never with a caret and never the floating `beta` dist-tag — npm resolves any lexically-greater `0.0.0-*` prerelease tag (`windows-fix`, `snapshot-*`, …) as satisfying a caret range over a beta, and those builds lack the `Plugin` export. Bump deliberately when targeting a newer OpenCode beta.
+- **CI uses aube**: both workflows install via `jdx/aube-action@v1` and run `aube ci` (frozen clean install) straight off `package-lock.json` — aube reads/writes npm lockfiles in place, so no lockfile migration; local dev commands stay npm. Release installs/builds/packs with aube but publishes via stock `npm publish --provenance --ignore-scripts` under OIDC trusted publishing (aube has no tokenless-auth support yet).
 - **TUI option shape**: `tui` must be an object (`{ "enabled": false }`). A bare boolean used to crash `resolveOptions` (now warns + falls back, but don't reintroduce it in docs/examples).
 - **TUI companion auto-load requires a package install**: the OpenCode TUI only auto-loads a server plugin's `./tui` export when the plugin's source type is `package` (i.e. installed via `plugin add`). Local-path dev entries (`../dist/index.js`) don't get the sidebar/report.
 
@@ -30,7 +31,7 @@ npm run build                              # tsup -> dist/
 
 Pushing a tag `v*` triggers `.github/workflows/release.yml`: verifies tag matches `package.json` version → typecheck/test/build → `npm publish --provenance` → GitHub release with the packed tarball. Requirements:
 
-- Repo secret `NPM_TOKEN` must be an **OTP-exempt** token (npm classic *Automation*, or granular with 2FA-bypass checked). A regular login token fails with `EOTP`.
+- Repo secret `NPM_TOKEN` is **gone** — publishing uses **npm Trusted Publishing (OIDC)**. One-time prerequisite: configure the *Trusted Publisher* on npmjs.com for `opencode-dcp` (provider: GitHub Actions, repo `arafays/opencode-dcp`, workflow `release.yml`). Requires `id-token: write` and npm ≥ 11.5.1 (workflow installs `npm@latest` first). Don't reintroduce token auth: classic tokens were revoked Dec 2025, granular tokens expire every 90 days and bypass-2FA is being restricted.
 - To cut a release: bump version, commit, `git tag vX.Y.Z && git push origin vX.Y.Z`.
 
 ## Invariants

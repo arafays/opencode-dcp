@@ -5,18 +5,38 @@ on:
     branches: [main]
   pull_request:
 
+# Least privilege: CI only ever needs to read the repo.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   ci:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # engines.node is >=20; Node 20 went EOL in Apr 2026, so gate on the
+      # supported LTS lines: 22 (maintenance) and 24 (active).
+      matrix:
+        node-version: ["22", "24"]
     steps:
-      - uses: actions/checkout@v4
+      # Pinned majors running on the node24 action runtime (no more
+      # Node 20 deprecation warnings): checkout@v7, aube-action@v1.
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      # Installs aube onto PATH and Node.js via mise — covers both the
+      # package manager and the runtime, replacing actions/setup-node.
+      # No separate cache step: aube's global store makes cold installs fast.
+      - uses: jdx/aube-action@v1
         with:
-          node-version: 22
-          cache: npm
+          version: latest
+          node-version: ${{ matrix.node-version }}
 
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run build
+      # Frozen clean install; aube reads package-lock.json natively.
+      - run: aube ci
+      - run: aube run typecheck
+      - run: aube test
+      - run: aube run build

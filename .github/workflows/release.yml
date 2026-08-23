@@ -6,19 +6,19 @@ on:
 
 permissions:
   contents: write # create the GitHub release and attach artifacts
-  id-token: write # npm provenance
+  id-token: write # OIDC trusted publishing + SLSA provenance
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      # Installs aube onto PATH plus Node 24 via mise — replaces actions/setup-node.
+      - uses: jdx/aube-action@v1
         with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
-          cache: npm
+          version: latest
+          node-version: "24"
 
       - name: Verify tag matches package version
         run: |
@@ -28,21 +28,31 @@ jobs:
             exit 1
           fi
 
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run build
+      # Frozen clean install; aube reads package-lock.json natively.
+      - run: aube ci
+      - run: aube run typecheck
+      - run: aube test
 
-      # Publish first: `prepublishOnly` re-runs the build with tsup clean:true,
-      # which would wipe any tarball packed beforehand.
-      - name: Publish to npm (with provenance)
-        run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # Build explicitly: publish below passes --ignore-scripts, so the
+      # prepublishOnly hook (typecheck/test/build) will NOT re-run and
+      # cannot wipe dist/ out from under us.
+      - run: aube run build
+
+      # Auth: npm classic tokens were permanently revoked Dec 2025 and
+      # granular tokens expire every 90 days, so there is intentionally NO
+      # NPM_TOKEN secret here. The job's short-lived OIDC token authenticates
+      # against the "Trusted Publisher" configured on npmjs.com for
+      # opencode-dcp (provider: GitHub Actions, repo: arafays/opencode-dcp,
+      # workflow: release.yml). Requires npm >= 11.5.1.
+      - name: Ensure npm supports trusted publishing
+        run: npm install -g npm@latest
+
+      - name: Publish to npm (trusted publishing + provenance)
+        run: npm publish --access public --provenance --ignore-scripts
 
       - name: Pack tarball
         run: |
-          npm pack --pack-destination dist
+          aube pack --pack-destination dist
           TARBALL="dist/opencode-dcp-$(node -p "require('./package.json').version").tgz"
           test -f "$TARBALL" || { echo "::error::expected $TARBALL"; ls -la dist/; exit 1; }
 
