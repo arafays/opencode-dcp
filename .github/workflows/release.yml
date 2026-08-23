@@ -48,7 +48,10 @@ jobs:
         run: npm install -g npm@latest
 
       - name: Publish to npm (trusted publishing + provenance)
-        run: npm publish --access public --provenance --ignore-scripts
+        # Explicit dist-tag: npm refuses to publish prerelease versions
+        # without --tag, and this project ships every release (betas
+        # included) under `latest`.
+        run: npm publish --access public --provenance --ignore-scripts --tag latest
 
       - name: Pack tarball
         run: |
