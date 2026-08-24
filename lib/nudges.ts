@@ -6,7 +6,7 @@ import { CONTEXT_LIMIT_NUDGE, ITERATION_NUDGE } from "./prompts"
  * Context-pressure nudges. Usage numbers come from provider usage events
  * (`session.usage.updated`), tracked per session by the event pump. When the
  * tracked usage crosses the configured budget, a reminder is appended to the
- * outbound transcript asking the model to run `compress`.
+ * outbound transcript asking the model to run `prune`.
  *
  * Rate limiting: at most one active nudge per
  * `nudgeFrequency` transcript messages; anchors clear when a compression

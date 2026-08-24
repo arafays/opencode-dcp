@@ -70,7 +70,7 @@ On every model dispatch (`ctx.session.hook("context")`) the plugin transforms th
 outbound transcript only — stored session history is never modified:
 
 1. **Scan & mirror** — index the transcript with stable keys; remember it so the
-   `compress` tool can resolve ranges.
+   `prune` tool can resolve ranges.
 2. **Boundary IDs** — every message gets an alias `m0001, m0002, …` injected as
    `<dcp-message-id>` tags on user texts and textual tool results. Compressed
    sections are addressed as `b1, b2, …`.
@@ -79,13 +79,16 @@ outbound transcript only — stored session history is never modified:
 4. **Pruning** — superseded/errored tool outputs are replaced with short
    placeholders (protected tools like `question`/`edit` are never touched).
 5. **Nudges** — when provider usage crosses `maxContextLimit`, a reminder asks
-   the model to run `compress`; rate-limited by `nudgeFrequency`.
+   the model to run `prune`; rate-limited by `nudgeFrequency`.
 
-The model calls **`compress`** itself (registered with the platform default
-`codemode: true`, so it is exposed through the Code Mode `tools.compress`
-catalog in agentic sessions). It picks non-overlapping ranges by boundary ID and writes
-an exhaustive summary per range; nested blocks are consumed and their summaries
-folded in via `(bN)` placeholders. Deduplication and error-purge strategies run
+The model calls **`prune`** itself (registered with the platform default
+`codemode: true`, so it is exposed through the Code Mode `tools.prune`
+catalog in agentic sessions; named `prune` to avoid clashing with the platform's
+built-in compress tool). It picks non-overlapping ranges by boundary ID and writes
+dense summaries per range. A range may cover previously pruned blocks: including
+`(bN)` carries that block's full content forward, omitting it permanently drops
+the block's content from context — how stale completed work gets pruned.
+Deduplication and error-purge strategies run
 at compression time so idle sessions keep their prompt-cache prefix stable.
 State persists per session across restarts via plugin storage.
 
@@ -121,7 +124,7 @@ panel:
 
 | Command | Effect |
 | ------- | ------ |
-| `/dcp-compress [focus]` | Instructs the model to run a compression pass now |
+| `/dcp-prune [focus]` | Instructs the model to run a pruning pass now |
 
 ## Options
 
@@ -145,8 +148,8 @@ All optional (defaults shown):
 }
 ```
 
-Permissions: the tool's permission action is `compress`; gate it with normal V2
-permission rules (`{ "action": "compress", "effect": "allow" }`).
+Permissions: the tool's permission action is `prune`; gate it with normal V2
+permission rules (`{ "action": "prune", "effect": "allow" }`).
 
 ## Develop
 

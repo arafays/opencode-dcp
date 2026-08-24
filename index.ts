@@ -1,6 +1,6 @@
 import { Plugin } from "@opencode-ai/plugin"
 
-import { compressToolDefinition } from "./lib/compress-tool"
+import { pruneToolDefinition } from "./lib/prune-tool"
 import { resolveOptions } from "./lib/config"
 import { registerCommands } from "./lib/commands"
 import { startEventPump } from "./lib/events"
@@ -21,7 +21,7 @@ import {
  *
  * Keeps the model's context window high-signal by:
  *  - injecting DCP instructions into the system prompt,
- *  - exposing a model-driven `compress` tool that replaces closed conversation
+ *  - exposing a model-driven `prune` tool that replaces closed conversation
  *    ranges with the model's own technical summaries,
  *  - pruning superseded tool outputs and running dedupe/purge-error strategies
  *    at compression time,
@@ -161,7 +161,7 @@ export default Plugin.define({
     await ctx.tool.transform((tools) => {
       addTool(
         tools as unknown as AddableTools,
-        compressToolDefinition({
+        pruneToolDefinition({
           store,
           mirror,
           logger,
@@ -172,7 +172,7 @@ export default Plugin.define({
             const key = `${model.providerID}/${model.id}`
             const cached = contextLimits.get(key)
             if (cached !== undefined || catalogListed) return cached
-            // Populate asynchronously; the next dispatch/compress sees it.
+            // Populate asynchronously; the next dispatch/prune sees it.
             void catalogContextLimit(model.providerID, model.id).catch(() => {})
             return undefined
           },

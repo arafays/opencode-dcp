@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 
 import { resolveOptions } from "../lib/config"
+import { purgeErrors } from "../lib/strategies"
 import {
   applyCompressionBlocks,
   injectBoundaryTags,
@@ -153,6 +154,38 @@ test("injectBoundaryTags tags user texts and textual tool results only", () => {
   assert.match(results[0]!.result.value as string, /<dcp-message-id>m0003<\/dcp-message-id>$/)
   // JSON results are left untouched.
   assert.deepEqual(results[1]!.result.value, { x: 1 })
+})
+
+test("purgeErrors eats stale errored protected-tool calls but keeps successes", () => {
+  const messages: WireMessage[] = [
+    { id: "u1", role: "user", content: [{ type: "text", text: "go" }] },
+    {
+      id: "a1",
+      role: "assistant",
+      content: [
+        { type: "tool-call", id: "e1", name: "edit", input: {} },
+        { type: "tool-call", id: "s1", name: "edit", input: {} },
+      ],
+    },
+    {
+      id: "t1",
+      role: "tool",
+      content: [
+        { type: "tool-result", id: "e1", name: "edit", result: { type: "error", value: { message: "not found" } } },
+        { type: "tool-result", id: "s1", name: "edit", result: { type: "text", value: "wrote file" } },
+      ],
+    },
+    ...Array.from({ length: 6 }, (_, i): WireMessage => ({
+      id: `u${i + 2}`,
+      role: "user",
+      content: [{ type: "text", text: `turn ${i + 2}` }],
+    })),
+  ]
+  const index = scanTranscript(messages)
+  assert.ok(index.turnCount > 4)
+  const state = createSessionState("s")
+  const result = purgeErrors(state, index, CONFIG)
+  assert.deepEqual(result.added, ["e1"])
 })
 
 test("stripHallucinatedTags removes echoed boundary tags", () => {

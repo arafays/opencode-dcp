@@ -2,7 +2,7 @@
 
 ## What this is
 
-OpenCode **V2** plugin implementing Dynamic Context Pruning. Entrypoint `index.ts` (`Plugin.define`); logic in `lib/` split as: `transcript/` (scan → mirror → edit pipeline), `state/store.ts` (persisted per-session state), `compress-tool.ts` (model-invoked `compress` tool), `prune.ts` + `strategies.ts`, `nudges.ts` + `events.ts` (usage event pump), `config.ts` (options resolution), `tui-bridge.ts` (stats snapshot writer). Published to npm as `opencode-dcp`; repo doubles as the plugin's own dev harness via `.opencode/opencode.json`.
+OpenCode **V2** plugin implementing Dynamic Context Pruning. Entrypoint `index.ts` (`Plugin.define`); logic in `lib/` split as: `transcript/` (scan → mirror → edit pipeline), `state/store.ts` (persisted per-session state), `prune-tool.ts` (model-invoked `prune` tool), `prune.ts` + `strategies.ts`, `nudges.ts` + `events.ts` (usage event pump), `config.ts` (options resolution), `tui-bridge.ts` (stats snapshot writer). Published to npm as `opencode-dcp`; repo doubles as the plugin's own dev harness via `.opencode/opencode.json`.
 
 ## Commands
 
@@ -42,7 +42,7 @@ Pushing a tag `v*` triggers `.github/workflows/release.yml`: verifies tag matche
 - Transcripts are append-only between compactions/reverts; those events reset DCP state.
 - Dedup/error-purge runs at compression time specifically so idle sessions keep a stable prompt-cache prefix — don't introduce mid-transcript rewrites outside compression.
 - Boundary IDs (`m0001…` messages, `b1…` blocks, `<dcp-message-id>` tags) are environment-injected addressing metadata, never model output.
-- The `compress` tool name doubles as its V2 permission action — don't rename casually.
+- The `prune` tool name doubles as its V2 permission action (renamed from `compress` to avoid clashing with the platform's built-in compress tool) — don't rename casually.
 
 ## Beta API
 

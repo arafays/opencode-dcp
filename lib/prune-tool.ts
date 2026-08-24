@@ -1,6 +1,6 @@
 import type { DcpOptions } from "./config"
 import type { Logger } from "./logger"
-import { COMPRESS_RANGE, RANGE_FORMAT_EXTENSION } from "./prompts"
+import { PRUNE_RANGE } from "./prompts"
 import { formatBlockRef, parseBlockRef, parseMessageRef } from "./refs"
 import { applyCompression, activeBlocks, TAIL_ANCHOR } from "./state/store"
 import type { SessionRuntime, StateStore } from "./state/store"
@@ -12,7 +12,8 @@ import { deduplicate, purgeErrors } from "./strategies"
 import type { CompressionEventRecord } from "./tui-bridge"
 
 /**
- * The model-driven `compress` tool. Registered with the platform default
+ * The model-driven `prune` tool (named to avoid clashing with the platform's
+ * default compress/compact tooling). Registered with the platform default
  * (`codemode: true`), which exposes it through the Code Mode `execute`
  * catalog. The model picks conversation ranges using injected
  * boundary IDs (`mNNNN` / `bN`) and writes the summaries; this tool validates
@@ -21,17 +22,17 @@ import type { CompressionEventRecord } from "./tui-bridge"
  * the covered ranges for the synthetic summaries on every dispatch.
  */
 
-export const COMPRESS_TOOL_NAME = "compress"
+export const PRUNE_TOOL_NAME = "prune"
 
-export interface CompressRangeEntry {
+export interface PruneRangeEntry {
   startId: string
   endId: string
   summary: string
 }
 
-export interface CompressToolArgs {
+export interface PruneToolArgs {
   topic: string
-  content: CompressRangeEntry[]
+  content: PruneRangeEntry[]
 }
 
 const INPUT_SCHEMA = {
@@ -43,7 +44,7 @@ const INPUT_SCHEMA = {
     },
     content: {
       type: "array",
-      description: "One or more ranges to compress, each with start/end boundaries and a summary",
+      description: "One or more ranges to prune, each with start/end boundaries and a summary",
       items: {
         type: "object",
         properties: {
@@ -69,7 +70,7 @@ const INPUT_SCHEMA = {
   additionalProperties: false,
 } as const
 
-export interface CompressDeps {
+export interface PruneDeps {
   store: StateStore
   mirror: TranscriptMirror
   logger: Logger
@@ -80,13 +81,13 @@ export interface CompressDeps {
   recordCompression?(input: { sessionId: string; record: CompressionEventRecord }): void
 }
 
-export interface CompressToolContext {
+export interface PruneToolContext {
   sessionID: string
   progress?: (update: Record<string, unknown>) => Promise<void>
 }
 
 interface ResolvedPlan {
-  entry: CompressRangeEntry
+  entry: PruneRangeEntry
   coveredKeys: string[]
   coveredToolIds: string[]
   coveredTokens: number
@@ -95,21 +96,21 @@ interface ResolvedPlan {
   consumedBlockIds: number[]
 }
 
-export function compressToolDefinition(deps: CompressDeps) {
+export function pruneToolDefinition(deps: PruneDeps) {
   return {
-    name: COMPRESS_TOOL_NAME,
-    description: COMPRESS_RANGE + RANGE_FORMAT_EXTENSION,
+    name: PRUNE_TOOL_NAME,
+    description: PRUNE_RANGE,
     input: INPUT_SCHEMA,
     // Keep the default `codemode: true`: the tool is exposed through the
     // CodeMode `execute` catalog, which is how models reach it in V2. Setting
     // `codemode: false` removes it from that catalog and makes it callable by
     // nothing.
-    execute: async (input: unknown, context: CompressToolContext) => {
-      let args: CompressToolArgs
+    execute: async (input: unknown, context: PruneToolContext) => {
+      let args: PruneToolArgs
       try {
         args = validateArgs(input)
       } catch (error) {
-        return { content: `compress failed: ${(error as Error).message}` }
+        return { content: `prune failed: ${(error as Error).message}` }
       }
       const sessionId = context.sessionID
 
@@ -117,7 +118,7 @@ export function compressToolDefinition(deps: CompressDeps) {
       if (!index || index.messages.length === 0) {
         return {
           content:
-            "compress failed: no conversation context is available yet. Send a message first.",
+            "prune failed: no conversation context is available yet. Send a message first.",
         }
       }
 
@@ -132,10 +133,10 @@ export function compressToolDefinition(deps: CompressDeps) {
       try {
         plans = resolvePlans(args, index, runtime)
       } catch (error) {
-        return { content: `compress failed: ${(error as Error).message}` }
+        return { content: `prune failed: ${(error as Error).message}` }
       }
 
-      await context.progress?.({ title: `DCP: compressing "${args.topic}"` })
+      await context.progress?.({ title: `DCP: pruning "${args.topic}"` })
 
       let totalNewMessages = 0
       let tokensCovered = 0
@@ -145,7 +146,7 @@ export function compressToolDefinition(deps: CompressDeps) {
 
       try {
         for (const plan of plans) {
-          const expandedSummary = expandPlaceholders(plan.entry.summary, runtime.state, plan.consumedBlockIds)
+          const expandedSummary = expandPlaceholders(plan.entry.summary, runtime.state)
           const block = applyCompression({
             state: runtime.state,
             refs: runtime.refs,
@@ -168,7 +169,7 @@ export function compressToolDefinition(deps: CompressDeps) {
           blockLabels.push(formatBlockRef(block.blockId))
         }
       } catch (error) {
-        return { content: `compress failed: ${(error as Error).message}` }
+        return { content: `prune failed: ${(error as Error).message}` }
       }
 
       await deps.store.persist(sessionId)
@@ -206,7 +207,7 @@ export function compressToolDefinition(deps: CompressDeps) {
           : ""
 
       return {
-        content: `Compressed ${totalNewMessages} message(s) into ${blockLabels.length} compressed section(s) (${blockLabels.join(", ")}).${usageNote}`,
+        content: `Pruned ${totalNewMessages} message(s) into ${blockLabels.length} pruned section(s) (${blockLabels.join(", ")}).${usageNote}`,
         metadata: { topic: args.topic, blocks: blockLabels },
       }
     },
@@ -215,13 +216,13 @@ export function compressToolDefinition(deps: CompressDeps) {
 
 // -- argument validation -----------------------------------------------------
 
-function validateArgs(input: unknown): CompressToolArgs {
+function validateArgs(input: unknown): PruneToolArgs {
   if (typeof input !== "object" || input === null) throw new Error("arguments must be an object")
   const raw = input as Record<string, unknown>
-  const topic = typeof raw.topic === "string" && raw.topic.trim().length > 0 ? raw.topic.trim() : "Context compression"
+  const topic = typeof raw.topic === "string" && raw.topic.trim().length > 0 ? raw.topic.trim() : "Context pruning"
   const content = Array.isArray(raw.content) ? raw.content : []
   if (content.length === 0) throw new Error("content must be a non-empty array of ranges")
-  const entries: CompressRangeEntry[] = []
+  const entries: PruneRangeEntry[] = []
   for (const item of content) {
     if (typeof item !== "object" || item === null) throw new Error("each range entry must be an object")
     const entry = item as Record<string, unknown>
@@ -237,7 +238,7 @@ function validateArgs(input: unknown): CompressToolArgs {
 
 // -- range resolution --------------------------------------------------------
 
-function resolvePlans(args: CompressToolArgs, index: TranscriptIndex, runtime: SessionRuntime): ResolvedPlan[] {
+function resolvePlans(args: PruneToolArgs, index: TranscriptIndex, runtime: SessionRuntime): ResolvedPlan[] {
   const keyToIndex = new Map<string, number>()
   index.keys.forEach((key, i) => keyToIndex.set(key, i))
 
@@ -350,32 +351,20 @@ function parseBoundaryChecked(id: string, field: string): ParsedBoundary {
 
 const BLOCK_PLACEHOLDER_REGEX = /\(\s*b(\d+)\s*\)/g
 
-/** Expands `(bN)` placeholders with stored block summaries; appends missing ones. */
-export function expandPlaceholders(
-  summary: string,
-  state: SessionState,
-  consumedBlockIds: number[],
-): string {
-  const missing = new Set<number>(consumedBlockIds)
-  const expanded = summary.replace(BLOCK_PLACEHOLDER_REGEX, (_match, digits: string) => {
+/**
+ * Expands `(bN)` placeholders with stored block summaries. Consumed blocks
+ * whose placeholder is absent are intentionally DROPPED: their content leaves
+ * the outbound transcript (it stays in persisted state, but inactive). This
+ * is how the model prunes previously compressed sections whose work is no
+ * longer relevant to the current task.
+ */
+export function expandPlaceholders(summary: string, state: SessionState): string {
+  return summary.replace(BLOCK_PLACEHOLDER_REGEX, (_match, digits: string) => {
     const blockId = Number.parseInt(digits, 10)
     const block = state.blocks[String(blockId)]
-    if (!block) {
-      throw new Error(`summary references unknown compressed block b${blockId}`)
-    }
-    missing.delete(blockId)
+    if (!block) throw new Error(`summary references unknown compressed block b${blockId}`)
     return stripBlockWrapper(block)
   })
-
-  if (missing.size === 0) return expanded
-  const appended = [...missing]
-    .map((id) => {
-      const block = state.blocks[String(id)]
-      return block ? stripBlockWrapper(block) : ""
-    })
-    .filter(Boolean)
-    .join("\n\n")
-  return `${expanded}\n\n${appended}`
 }
 
 /** Unwraps a stored block summary to its bare content for folding. */

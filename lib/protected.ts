@@ -3,8 +3,9 @@ import { ALWAYS_PROTECTED_TOOLS } from "./config"
 
 /**
  * Protection matching: tool-name globs and file-path globs that automatic
- * pruning must never touch. `question`/`edit`/`write`/`patch`/`compress` are
- * always protected on top of user configuration.
+ * pruning must never touch. Successful `question`/`edit`/`write`/`patch`/`prune`
+ * outputs are always protected on top of user configuration; errored calls of
+ * those tools stay purge-eligible (a failure carries nothing to preserve).
  */
 
 export function matchesGlob(pattern: string, value: string): boolean {
@@ -83,12 +84,14 @@ export interface ProtectionContext {
 }
 
 export function isToolAutoPrunable(
-  info: { name: string; input: unknown },
+  info: { name: string; input: unknown; isError?: boolean },
   protection: { dedupePatterns: string[]; purgePatterns: string[]; filePatterns: string[] },
   kind: "dedupe" | "purge",
 ): boolean {
   const namePatterns = kind === "dedupe" ? protection.dedupePatterns : protection.purgePatterns
-  if (isToolNameProtected(info.name, namePatterns)) return false
+  // Errored calls carry no decision or user intent (nothing happened) - only
+  // successful outputs of protected tools are off-limits to auto-pruning.
+  if (!info.isError && isToolNameProtected(info.name, namePatterns)) return false
   const paths = getFilePathsFromInput(info.input)
   if (isFilePathProtected(paths, protection.filePatterns)) return false
   return true
