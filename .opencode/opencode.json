@@ -6,7 +6,7 @@
       "package": "../dist/index.js",
       "options": {
         "debug": true,
-        "maxContextLimit": 70000,
+        "maxContextLimit": 120000,
         "strategies": {
           "deduplication": {
             "enabled": true

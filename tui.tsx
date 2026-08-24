@@ -91,46 +91,30 @@ export default Plugin.define({
       return stats.sessions[sessionId]
     }
 
-    // Compact always-on line under the session sidebar footer.
+    // Semantic theme tokens: green when pruning paid off, amber while the
+    // boundary-ID overhead of a fresh block is not yet paid back.
+    const savingsColor = (percent: number) =>
+      percent >= 0 ? ctx.theme.text.success : ctx.theme.text.subdued
+
+    // Compact always-on line in the prompt footer status area.
     const disposeFooter = ctx.ui.slot({
-      append: "sidebar.footer",
+      append: "prompt.footer.status",
       render: (input) => {
-        const snapshot = () => sessionStats(input.sessionID)
+        const dispatch = () => sessionStats(input.sessionID)?.lastDispatch
         return (
-          <Show when={snapshot()}>
-            {(snapshot: () => SessionStatsSnapshot) => (
-              <box flexDirection="row" gap={1}>
-                <text fg="#7aa2f7">DCP</text>
-                <Show
-                  when={snapshot().lastDispatch}
-                  fallback={<text fg="#565f89">no dispatch measured yet</text>}
-                >
-                  {(dispatch: () => NonNullable<SessionStatsSnapshot["lastDispatch"]>) => (
-                    <text>
-                      <span
-                        style={{
-                          fg:
-                            dispatch().savedPercent >= 0
-                              ? "#9ece6a"
-                              : "#e0af68", // amber: boundary-ID overhead not yet paid back
-                        }}
-                      >
-                        {dispatch().savedPercent >= 0 ? "−" : "+"}
-                        {Math.abs(dispatch().savedPercent)}%
-                      </span>
-                      <span style={{ fg: "#565f89" }}> · </span>
-                      {fmtTokens(dispatch().tokensBefore)}→{fmtTokens(dispatch().tokensAfter)} tok
-                      <Show when={snapshot().totals.blocksActive > 0}>
-                        <span style={{ fg: "#565f89" }}> · </span>
-                        <span style={{ fg: "#bb9af7" }}>
-                          {snapshot().totals.blocksActive} block
-                          {snapshot().totals.blocksActive === 1 ? "" : "s"}
-                        </span>
-                      </Show>
-                    </text>
-                  )}
-                </Show>
-              </box>
+          <Show when={dispatch()}>
+            {(dispatch: () => NonNullable<SessionStatsSnapshot["lastDispatch"]>) => (
+              <text>
+                <span style={{ fg: ctx.theme.text.default }}>DCP </span>
+                <span style={{ fg: savingsColor(dispatch().savedPercent) }}>
+                  {dispatch().savedPercent >= 0 ? "−" : "+"}
+                  {Math.abs(dispatch().savedPercent)}%
+                </span>
+                <span style={{ fg: ctx.theme.text.subdued }}>
+                  {" "}
+                  · {fmtTokens(dispatch().tokensBefore - dispatch().tokensAfter)} pruned
+                </span>
+              </text>
             )}
           </Show>
         )
@@ -170,15 +154,12 @@ export default Plugin.define({
                     padding={1}
                     width="70%"
                     height="60%"
-                    backgroundColor="#1a1b26"
+                    backgroundColor={ctx.theme.background.default}
                   >
                     <Show
                       when={snapshot()}
                       fallback={
-                        <text fg="#565f89">
-                          No DCP activity recorded for this session yet. Compressions and dispatch
-                          savings appear here once the plugin runs.
-                        </text>
+                        <text fg={ctx.theme.text.subdued}>No DCP activity recorded for this session yet.</text>
                       }
                     >
                       {(snapshot: () => SessionStatsSnapshot) => (
@@ -188,7 +169,7 @@ export default Plugin.define({
                             {(dispatch: () => NonNullable<SessionStatsSnapshot["lastDispatch"]>) => (
                               <text>
                                 Last dispatch {fmtTime(dispatch().at)} ·{" "}
-                                <span style={{ fg: dispatch().savedPercent >= 0 ? "#9ece6a" : "#e0af68" }}>
+                                <span style={{ fg: savingsColor(dispatch().savedPercent) }}>
                                   {dispatch().savedPercent >= 0 ? "−" : "+"}
                                   {Math.abs(dispatch().savedPercent)}% outbound tokens
                                 </span>{" "}
@@ -213,7 +194,9 @@ export default Plugin.define({
                                 <text>
                                   {fmtTime(record.at)} · {record.topic} · {record.ranges} range
                                   {record.ranges === 1 ? "" : "s"} · {record.messagesCovered} msg ·{" "}
-                                  <span style={{ fg: "#9ece6a" }}>−{fmtTokens(record.tokensSaved)} tok</span>
+                                  <span style={{ fg: ctx.theme.text.feedback.success.default }}>
+                                    −{fmtTokens(record.tokensSaved)} tok
+                                  </span>
                                 </text>
                               )}
                             </For>
