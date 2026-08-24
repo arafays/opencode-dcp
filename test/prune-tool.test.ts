@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 
-import { compressToolDefinition } from "../lib/compress-tool"
+import { pruneToolDefinition } from "../lib/prune-tool"
 import { resolveOptions } from "../lib/config"
 import { createLogger } from "../lib/logger"
 import { StateStore } from "../lib/state/store"
@@ -58,7 +58,7 @@ function harness() {
   const messages = fixture()
   const index = scanTranscript(messages)
   mirror.update(SESSION, index)
-  const tool = compressToolDefinition({
+  const tool = pruneToolDefinition({
     store,
     mirror,
     logger: createLogger(false),
@@ -70,7 +70,7 @@ function harness() {
   return { store, index, messages, run }
 }
 
-test("compress records a block covering the selected range", async () => {
+test("prune records a block covering the selected range", async () => {
   const { store, index, run } = harness()
   const runtime = await store.ensure(SESSION)
   for (const key of index.keys) runtime.refs.ensure(key)
@@ -80,7 +80,7 @@ test("compress records a block covering the selected range", async () => {
     content: [{ startId: "m0001", endId: "m0004", summary: "Explored the auth system thoroughly." }],
   })
 
-  assert.ok(!String(result.content).startsWith("compress failed"), String(result.content))
+  assert.ok(!String(result.content).startsWith("prune failed"), String(result.content))
   assert.match(String(result.content), /b1/)
   const state = runtime.state
   const block = state.blocks["1"]!
@@ -92,7 +92,7 @@ test("compress records a block covering the selected range", async () => {
   assert.equal(state.stats.compressRuns, 1)
 })
 
-test("compress consumes intersected blocks and expands their placeholders", async () => {
+test("prune consumes intersected blocks and expands their placeholders", async () => {
   const { store, index, run } = harness()
   const runtime = await store.ensure(SESSION)
   for (const key of index.keys) runtime.refs.ensure(key)
@@ -122,7 +122,28 @@ test("compress consumes intersected blocks and expands their placeholders", asyn
   assert.match(String(second.content), /b2/)
 })
 
-test("compress rejects explicitly overlapping ranges and unknown ids", async () => {
+test("prune drops a consumed block whose placeholder is omitted", async () => {
+  const { store, index, run } = harness()
+  const runtime = await store.ensure(SESSION)
+  for (const key of index.keys) runtime.refs.ensure(key)
+
+  await run({
+    topic: "First pass",
+    content: [{ startId: "m0001", endId: "m0004", summary: "stale completed work details" }],
+  })
+  await run({
+    topic: "Second pass",
+    // No (b1) placeholder: the stale block's content is intentionally dropped.
+    content: [{ startId: "m0003", endId: "m0005", summary: "only what matters now" }],
+  })
+
+  const secondBlock = runtime.state.blocks["2"]!
+  assert.equal(secondBlock.active, true)
+  assert.ok(secondBlock.consumedBlockIds.includes(1))
+  assert.ok(!secondBlock.summary.includes("stale completed work details"))
+})
+
+test("prune rejects explicitly overlapping ranges and unknown ids", async () => {
   const { store, index, run } = harness()
   const runtime = await store.ensure(SESSION)
   for (const key of index.keys) runtime.refs.ensure(key)
@@ -134,23 +155,23 @@ test("compress rejects explicitly overlapping ranges and unknown ids", async () 
       { startId: "m0002", endId: "m0003", summary: "two" },
     ],
   })
-  assert.match(String(overlap.content), /^compress failed: ranges overlap/)
+  assert.match(String(overlap.content), /^prune failed: ranges overlap/)
 
   const missing = await run({
     topic: "Missing",
     content: [{ startId: "m9999", endId: "m0003", summary: "nope" }],
   })
-  assert.match(String(missing.content), /^compress failed:/)
+  assert.match(String(missing.content), /^prune failed:/)
   assert.match(String(missing.content), /does not exist in the current context/)
 })
 
-test("compress rejects malformed arguments and empty context", async () => {
+test("prune rejects malformed arguments and empty context", async () => {
   const { run } = harness()
   const badArgs = await run({ topic: "", content: [] })
-  assert.match(String(badArgs.content), /^compress failed:/)
+  assert.match(String(badArgs.content), /^prune failed:/)
 
   const emptyStore = new StateStore(undefined)
-  const emptyTool = compressToolDefinition({
+  const emptyTool = pruneToolDefinition({
     store: emptyStore,
     mirror: new TranscriptMirror(),
     logger: createLogger(false),
@@ -165,7 +186,7 @@ test("compress rejects malformed arguments and empty context", async () => {
   assert.match(String(noContext.content), /no conversation context is available/)
 })
 
-test("compress clears pending nudge anchors on success", async () => {
+test("prune clears pending nudge anchors on success", async () => {
   const { store, index, run } = harness()
   const runtime = await store.ensure(SESSION)
   for (const key of index.keys) runtime.refs.ensure(key)

@@ -61,8 +61,11 @@ const DEFAULTS: DcpOptions = {
   },
 }
 
-/** Tools whose outputs are never pruned - they carry decisions or user intent. */
-export const ALWAYS_PROTECTED_TOOLS = ["question", "edit", "write", "patch", "compress"]
+/**
+ * Tools whose successful outputs are never auto-pruned - they carry decisions
+ * or user intent. Errored calls of these tools remain purge-eligible.
+ */
+export const ALWAYS_PROTECTED_TOOLS = ["question", "edit", "write", "patch", "prune"]
 
 function isLimitShape(value: unknown): value is LimitValue {
   return (
