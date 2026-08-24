@@ -11,9 +11,12 @@ import { For, Show } from "solid-js"
  * the exact file backing `ctx.storage.store("stats")` — so updates appear
  * live while a session runs.
  *
- * Enabled by default; disable with plugin option `{ "tui": { "enabled": false } }`
- * on the server side, which stops the stats writes (this module then renders
- * nothing).
+ * Enabled by default; disable via the TUI-side registration options
+ * (`options.enabled === false`), e.g. in `~/.config/opencode/cli.json`:
+ * `"plugins": [{ "package": ".../tui.tsx", "options": { "enabled": false } }]`.
+ * Server-side plugin options are NOT visible here; disabling the server side
+ * (`{ "tui": { "enabled": false } }` on the server plugin) stops stats writes,
+ * after which this companion renders nothing.
  */
 
 interface CompressionEventRecord {

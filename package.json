@@ -45,7 +45,7 @@
   },
   "dependencies": {
     "@anthropic-ai/tokenizer": "^0.0.4",
-    "@opencode-ai/plugin": "0.0.0-beta-17963",
+    "@opencode-ai/plugin": "0.0.0-beta-18027",
     "@opentui/core": "^0.5.7",
     "@opentui/solid": "^0.5.7",
     "solid-js": "^1.9.15"

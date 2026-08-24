@@ -1,12 +1,12 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": [
+  "plugins": [
     "-opencode.dcp",
     {
       "package": "../dist/index.js",
       "options": {
         "debug": true,
-        "maxContextLimit": "70000",
+        "maxContextLimit": 70000,
         "strategies": {
           "deduplication": {
             "enabled": true
