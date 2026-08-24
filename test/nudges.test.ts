@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 
-import { resolveOptions } from "../lib/config"
+import { resolveLimit, resolveOptions } from "../lib/config"
 import { UsageTracker, maybeContextNudge, maybeIterationNudge, usageTotal } from "../lib/nudges"
 
 const CONFIG = resolveOptions(undefined, () => {})
@@ -72,6 +72,26 @@ test("absolute token budgets and unknown windows behave sanely", () => {
     messageCount: 3,
   })
   assert.ok(hit?.includes("50,000 tokens"))
+
+  // A bare numeric string is absolute tokens, not a percentage.
+  const numericString = resolveOptions({ maxContextLimit: "70000" }, () => {})
+  assert.equal(numericString.maxContextLimit, "70000")
+  assert.equal(resolveLimit(numericString.maxContextLimit, 200_000), 70_000)
+  const stringHit = maybeContextNudge({
+    state: { nudgeAnchors: [] },
+    config: numericString,
+    usageTokens: 80_000,
+    modelContextLimit: 200_000,
+    messageCount: 2,
+  })
+  assert.ok(stringHit?.includes("70,000 tokens"))
+
+  // Percentage strings stay relative to the window.
+  assert.equal(resolveLimit("35%", 200_000), 70_000)
+
+  // Malformed values fall back to the default.
+  const invalid = resolveOptions({ maxContextLimit: "abc" }, () => {})
+  assert.equal(invalid.maxContextLimit, CONFIG.maxContextLimit)
 
   const zeroWindow = maybeContextNudge({
     state: { nudgeAnchors: [] },
