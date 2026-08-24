@@ -23,22 +23,6 @@ export function mapTextParts(
   return { ...message, content }
 }
 
-export function appendToLastTextPart(message: WireMessage, suffix: string): WireMessage {
-  for (let i = message.content.length - 1; i >= 0; i--) {
-    const part = message.content[i]
-    if (part && part.type === "text") {
-      const content = [...message.content]
-      content[i] = { ...part, text: part.text + suffix }
-      return { ...message, content }
-    }
-  }
-  // No text part present: append one.
-  return {
-    ...message,
-    content: [...message.content, { type: "text", text: suffix.trimStart() }],
-  }
-}
-
 /** Returns a copy of a role:"tool" message with one result value replaced. */
 export function withToolResultReplaced(
   message: WireMessage,

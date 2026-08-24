@@ -63,7 +63,7 @@ test("buildStatsSnapshot records dispatch deltas and keeps other sessions", () =
   const snapshot = buildStatsSnapshot(previous as TuiStatsSnapshot, {
     sessionId: "s1",
     model: "p/m",
-    dispatch: { at: 10, model: "p/m", messagesIn: 4, messagesOut: 4, tokensBefore: 1000, tokensAfter: 600 },
+    dispatch: { at: 10, model: "p/m", messagesIn: 4, tokensBefore: 1000, tokensAfter: 600 },
     totals: {
       dispatches: 1,
       compressRuns: 0,
@@ -90,7 +90,7 @@ test("buildStatsSnapshot reports negative percent when boundary-ID overhead exce
   // zero, but savedPercent stays signed so the TUI can render "+N%" overhead.
   const snapshot = buildStatsSnapshot(undefined, {
     sessionId: "s1",
-    dispatch: { at: 10, messagesIn: 4, messagesOut: 4, tokensBefore: 78200, tokensAfter: 78900 },
+    dispatch: { at: 10, messagesIn: 4, tokensBefore: 78200, tokensAfter: 78900 },
     totals: {
       dispatches: 1,
       compressRuns: 0,
@@ -144,7 +144,6 @@ test("sessionTotals summarizes active blocks and pruning", () => {
   const state = createSessionState("s")
   state.blocks["1"] = {
     blockId: 1,
-    runId: 1,
     active: true,
     topic: "a",
     summary: "sum",

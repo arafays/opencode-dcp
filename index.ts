@@ -43,7 +43,7 @@ export default Plugin.define({
     const logger = createLogger(config.debug)
 
     if (!config.enabled) {
-      logger.info("disabled by configuration")
+      logger.debug("disabled by configuration")
       return
     }
 
@@ -197,7 +197,7 @@ export default Plugin.define({
       signal: controller.signal,
     })
 
-    logger.info("initialized", {
+    logger.debug("initialized", {
       maxContextLimit: config.maxContextLimit,
       strategies: {
         deduplication: config.strategies.deduplication.enabled,

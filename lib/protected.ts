@@ -1,4 +1,3 @@
-import type { DcpOptions } from "./config"
 import { ALWAYS_PROTECTED_TOOLS } from "./config"
 
 /**
@@ -77,10 +76,6 @@ function matchesPathGlob(pattern: string, path: string): boolean {
       .join(".*")}$`,
   )
   return regex.test(normalizedPath)
-}
-
-export interface ProtectionContext {
-  config: DcpOptions
 }
 
 export function isToolAutoPrunable(

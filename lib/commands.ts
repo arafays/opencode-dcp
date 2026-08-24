@@ -6,7 +6,7 @@
  * permission handling and validation inside the tool.
  */
 
-export function dcpPruneTemplate(): string {
+function dcpPruneTemplate(): string {
   return [
     "<dcp-system-reminder>",
     "Manual prune requested by the user. Immediately call the `prune` tool on the largest",
@@ -16,7 +16,7 @@ export function dcpPruneTemplate(): string {
   ].join("\n")
 }
 
-export const DCP_PRUNE_DESCRIPTION = "Trigger DCP manual pruning with: /dcp-prune [focus]"
+const DCP_PRUNE_DESCRIPTION = "Trigger DCP manual pruning with: /dcp-prune [focus]"
 
 /** Minimal structural view of a command draft entry (client CommandInfo). */
 interface CommandDraftLike {

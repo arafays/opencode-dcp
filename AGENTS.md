@@ -16,24 +16,20 @@ npm run build                              # tsup -> dist/
 
 - Tests use `node:test` + `tsx` (no vitest/jest). Pure unit tests: build fixtures as `WireMessage[]`; no server or network needed.
 - No lint/format config exists; typecheck + tests are the only gate.
-- `mise.toml` pins `aube` (an npm-alternative package manager), but the committed lockfile is npm's and all documented commands use npm.
+- `mise.toml` pins `aube` (npm-alternative package manager), but the committed lockfile is npm's and all local commands use npm.
 
 ## Gotchas
 
-- **Rebuild before live testing**: `.opencode/opencode.json` loads the plugin from `../dist/index.js`. Source edits have no effect in an OpenCode session until `npm run build`. (`dist/` is gitignored, so builds stay out of commits.)
-- **Never `npm pack` before `npm publish`**: `prepublishOnly` re-runs the build with tsup `clean: true`, which **wipes `dist/`** — any tarball packed beforehand silently disappears. This broke CI once; `release.yml` builds explicitly and publishes with `--ignore-scripts`, so `prepublishOnly` never fires in CI — keep packing *after* publishing anyway.
-- **Dependency pinning**: `@opencode-ai/plugin` is pinned **exactly** (e.g. `0.0.0-beta-17887`), never with a caret and never the floating `beta` dist-tag — npm resolves any lexically-greater `0.0.0-*` prerelease tag (`windows-fix`, `snapshot-*`, …) as satisfying a caret range over a beta, and those builds lack the `Plugin` export. Bump deliberately when targeting a newer OpenCode beta.
-- **CI uses aube**: both workflows install via `jdx/aube-action@v1` and run `aube ci` (frozen clean install) straight off `package-lock.json` — aube reads/writes npm lockfiles in place, so no lockfile migration; local dev commands stay npm. Release installs/builds/packs with aube but publishes via stock `npm publish --provenance --ignore-scripts` under OIDC trusted publishing (aube has no tokenless-auth support yet).
-- **Global + dev plugin collision**: OpenCode concatenates global and project `plugin` lists, and two instances of the same plugin ID kill server start/reload with `Duplicate plugin ID: opencode.dcp`. This repo's dev harness coexists with a globally installed `opencode-dcp` because `.opencode/opencode.json` lists `"-opencode.dcp"` (leading `-` = remove-operation, matched by plugin ID, processed after global entries) before its local-path entry. Don't drop that line while the npm package is enabled globally.
-- **TUI option shape**: `tui` must be an object (`{ "enabled": false }`). A bare boolean used to crash `resolveOptions` (now warns + falls back, but don't reintroduce it in docs/examples).
-- **TUI companion auto-load requires a package install**: the OpenCode TUI only auto-loads a server plugin's `./tui` export when the plugin's source type is `package` (i.e. installed via `plugin add`). Local-path dev entries (`../dist/index.js`) don't get the sidebar/report.
+- **Rebuild before live testing**: `.opencode/opencode.json` loads the plugin from `../dist/index.js`. Source edits have no effect in an OpenCode session until `npm run build`. (`dist/` is gitignored.)
+- **Never `npm pack` before `npm publish`**: `prepublishOnly` runs tsup with `clean: true`, wiping `dist/`. Pack *after* publishing. (CI is safe: `release.yml` builds explicitly and publishes with `--ignore-scripts`.)
+- **Dependency pinning**: `@opencode-ai/plugin` uses the `beta` dist-tag in `package.json`; the lockfile pins the exact resolved version. Never use a caret range (`^0.0.0-beta-…`) — npm treats any lexically-greater `0.0.0-*` prerelease tag as satisfying the range, and those builds lack the `Plugin` export.
+- **Global + dev plugin collision**: two instances of the same plugin ID kill server start with `Duplicate plugin ID: opencode.dcp`. `.opencode/opencode.json` lists `"-opencode.dcp"` (remove-operation, processed after global entries) before its local-path entry. Don't drop that line while the npm package is enabled globally.
+- **TUI option shape**: `tui` must be an object (`{ "enabled": false }`), not a bare boolean (used to crash `resolveOptions`).
+- **TUI companion auto-load requires a package install**: the TUI only auto-loads a server plugin's `./tui` export when the plugin's source type is `package` (installed via `plugin add`). Local-path entries (`../dist/index.js`) don't get the sidebar/report.
 
-## Release flow
+## Release
 
-Pushing a tag `v*` triggers `.github/workflows/release.yml`: verifies tag matches `package.json` version → typecheck/test/build → `npm publish --provenance` → GitHub release with the packed tarball. Requirements:
-
-- Repo secret `NPM_TOKEN` is **gone** — publishing uses **npm Trusted Publishing (OIDC)**. One-time prerequisite: configure the *Trusted Publisher* on npmjs.com for `opencode-dcp` (provider: GitHub Actions, repo `arafays/opencode-dcp`, workflow `release.yml`). Requires `id-token: write` and npm ≥ 11.5.1 (workflow installs `npm@latest` first). Don't reintroduce token auth: classic tokens were revoked Dec 2025, granular tokens expire every 90 days and bypass-2FA is being restricted.
-- To cut a release: bump version, commit, `git tag vX.Y.Z && git push origin vX.Y.Z`.
+Publishing is npm OIDC trusted publishing (no `NPM_TOKEN` secret); auth/provenance details live in `.github/workflows/release.yml`. To cut a release: bump version, commit, `git tag vX.Y.Z && git push origin vX.Y.Z`.
 
 ## Invariants
 

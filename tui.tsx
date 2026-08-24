@@ -39,7 +39,6 @@ interface SessionStatsSnapshot {
     agent?: string
     model?: string
     messagesIn: number
-    messagesOut: number
     tokensBefore: number
     tokensAfter: number
     savedTokens: number

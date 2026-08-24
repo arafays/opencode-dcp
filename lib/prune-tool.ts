@@ -191,7 +191,7 @@ export function pruneToolDefinition(deps: PruneDeps) {
       } catch {
         // Display-only bridge.
       }
-      deps.logger.info("compression applied", {
+      deps.logger.debug("compression applied", {
         sessionId,
         topic: args.topic,
         blocks: blockLabels,

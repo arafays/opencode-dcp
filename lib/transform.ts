@@ -104,7 +104,7 @@ export function createContextHook(deps: TransformDeps) {
       pruneToolOutputs(runtime.state, messages, deps.config)
       injectBoundaryTags(runtime.refs.byKey, messages, index.keys)
 
-      await injectNudges(deps, event, index.keys.length)
+      await injectNudges(deps, event, index.keys.length, runtime.state)
 
       publishDispatchStats(deps, {
         sessionId,
@@ -159,7 +159,6 @@ function publishDispatchStats(
         agent: input.agent,
         model: input.model,
         messagesIn: input.messagesIn,
-        messagesOut: input.messagesIn,
         tokensBefore: estimateTokens(input.charsBefore),
         tokensAfter: estimateTokens(input.charsAfter),
       },
@@ -174,6 +173,7 @@ async function injectNudges(
   deps: TransformDeps,
   event: SessionContextEvent,
   messageCount: number,
+  state: SessionState,
 ): Promise<void> {
   const reminders: string[] = []
 
@@ -182,7 +182,7 @@ async function injectNudges(
     const limit =
       (await deps.catalogContextLimit(event.model.providerID, event.model.id)) ?? 200_000
     const nudge = maybeContextNudge({
-      state: { nudgeAnchors: (await deps.store.ensure(event.sessionID)).state.nudgeAnchors },
+      state,
       config: deps.config,
       usageTokens,
       modelContextLimit: limit,

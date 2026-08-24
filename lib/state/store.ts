@@ -83,10 +83,6 @@ export class StateStore {
 /** Sentinel anchor key meaning "append at transcript tail". */
 export const TAIL_ANCHOR = "tail"
 
-export function allocateRunId(state: SessionState): number {
-  return state.nextRunId++
-}
-
 export function allocateBlockId(state: SessionState): number {
   const blockId = state.nextBlockId++
   return blockId
@@ -113,12 +109,10 @@ export function applyCompression(input: {
   anchorKey: string
 }): CompressionBlock {
   const { state } = input
-  const runId = allocateRunId(state)
   const blockId = allocateBlockId(state)
   const wrapped = wrapCompressedSummary(blockId, input.summary)
   const block: CompressionBlock = {
     blockId,
-    runId,
     active: true,
     topic: input.topic,
     summary: wrapped,

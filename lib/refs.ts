@@ -15,10 +15,6 @@ const MESSAGE_REF_WIDTH = 4
 const MESSAGE_REF_MIN_INDEX = 1
 export const MESSAGE_REF_MAX_INDEX = 9999
 
-export type ParsedBoundaryId =
-  | { kind: "message"; ref: string; index: number }
-  | { kind: "block"; ref: string; blockId: number }
-
 export function formatMessageRef(index: number): string {
   if (!Number.isInteger(index) || index < MESSAGE_REF_MIN_INDEX || index > MESSAGE_REF_MAX_INDEX) {
     throw new Error(`Message ref index out of bounds: ${index}. Supported range is 1-${MESSAGE_REF_MAX_INDEX}.`)
@@ -46,28 +42,8 @@ export function parseBlockRef(ref: string): number | null {
   return Number.isInteger(id) ? id : null
 }
 
-export function parseBoundaryId(id: string): ParsedBoundaryId | null {
-  const normalized = id.trim().toLowerCase()
-  const messageIndex = parseMessageRef(normalized)
-  if (messageIndex !== null) return { kind: "message", ref: formatMessageRef(messageIndex), index: messageIndex }
-  const blockId = parseBlockRef(normalized)
-  if (blockId !== null) return { kind: "block", ref: formatBlockRef(blockId), blockId }
-  return null
-}
-
-function escapeXmlAttribute(value: string): string {
-  return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-}
-
-export function formatMessageIdTag(ref: string, attributes?: Record<string, string | undefined>): string {
-  const serializedAttributes = Object.entries(attributes ?? {})
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([name, value]) => {
-      if (name.trim().length === 0 || typeof value !== "string" || value.length === 0) return ""
-      return ` ${name}="${escapeXmlAttribute(value)}"`
-    })
-    .join("")
-  return `\n<${MESSAGE_ID_TAG_NAME}${serializedAttributes}>${ref}</${MESSAGE_ID_TAG_NAME}>`
+export function formatMessageIdTag(ref: string): string {
+  return `\n<${MESSAGE_ID_TAG_NAME}>${ref}</${MESSAGE_ID_TAG_NAME}>`
 }
 
 /** Bidirectional alias registry, JSON-serializable for persistence. */

@@ -57,22 +57,16 @@ export function startEventPump(input: {
           }
           case "session.compaction.started":
           case "session.compaction.ended":
-          case "session.revert.committed": {
-            if (!sessionId) break
-            store.reset(sessionId)
-            mirror.drop(sessionId)
-            usage.drop(sessionId)
-            logger.info("session history rewritten; DCP state reset", {
-              sessionId,
-              reason: event.type,
-            })
-            break
-          }
+          case "session.revert.committed":
           case "session.deleted": {
             if (!sessionId) break
             store.reset(sessionId)
             mirror.drop(sessionId)
-            usage.drop(sessionId)
+            usage.reset(sessionId)
+            logger.debug("session event; DCP state reset", {
+              sessionId,
+              reason: event.type,
+            })
             break
           }
           default:

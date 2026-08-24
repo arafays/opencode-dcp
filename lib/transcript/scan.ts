@@ -110,11 +110,7 @@ export function scanTranscript(messages: WireMessage[]): TranscriptIndex {
   }
 
   const turnCount = users.length
-  let userIdx = 0
-  for (let index = 0; index < messages.length; index++) {
-    while (userIdx < users.length && users[userIdx]!.index <= index) userIdx++
-    void index
-  }
+
   // Turn per tool = number of user messages at or before its result position.
   for (const info of tools.values()) {
     if (info.index < 0) {
@@ -147,9 +143,4 @@ function assignKeys(messages: WireMessage[]): string[] {
     }
   }
   return keys
-}
-
-/** Turn number a transcript index belongs to. */
-export function turnAt(users: UserEntry[], index: number): number {
-  return users.filter((user) => user.index <= index).length
 }

@@ -64,10 +64,6 @@ export class UsageTracker {
     this.baseline.delete(sessionId)
     this.current.delete(sessionId)
   }
-
-  drop(sessionId: string): void {
-    this.reset(sessionId)
-  }
 }
 
 /**

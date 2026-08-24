@@ -7,7 +7,6 @@ import {
   formatMessageIdTag,
   formatMessageRef,
   parseBlockRef,
-  parseBoundaryId,
   parseMessageRef,
 } from "../lib/refs"
 
@@ -34,18 +33,10 @@ test("parse functions round-trip and reject malformed refs", () => {
   assert.equal(parseBlockRef("b7"), 7)
   assert.equal(parseBlockRef("b0"), null)
   assert.equal(parseBlockRef("m0001"), null)
-
-  const message = parseBoundaryId("m0012")
-  assert.deepEqual(message, { kind: "message", ref: "m0012", index: 12 })
-  const block = parseBoundaryId(" B3 ")
-  assert.deepEqual(block, { kind: "block", ref: "b3", blockId: 3 })
-  assert.equal(parseBoundaryId("nope"), null)
 })
 
-test("formatMessageIdTag serializes attributes safely", () => {
+test("formatMessageIdTag wraps the ref", () => {
   assert.equal(formatMessageIdTag("m0001"), "\n<dcp-message-id>m0001</dcp-message-id>")
-  const tagged = formatMessageIdTag("b2", { topic: 'auth "scope"' })
-  assert.match(tagged, /topic="auth &quot;scope&quot;"/)
 })
 
 test("RefRegistry allocates stable sequential aliases", () => {

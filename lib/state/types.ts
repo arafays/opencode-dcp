@@ -8,7 +8,6 @@ import type { RefRegistryJson } from "../refs"
 
 export interface CompressionBlock {
   blockId: number
-  runId: number
   active: boolean
   topic: string
   /** Final stored summary (placeholders already expanded), wrapped for display. */
@@ -44,7 +43,6 @@ export interface SessionState {
   blocks: Record<string, CompressionBlock>
   activeBlockIds: number[]
   nextBlockId: number
-  nextRunId: number
   /** Rate-limit anchors for the context nudge (transcript message counts). */
   nudgeAnchors: number[]
   stats: SessionStats
@@ -59,7 +57,6 @@ export function createSessionState(sessionId: string): SessionState {
     blocks: {},
     activeBlockIds: [],
     nextBlockId: 1,
-    nextRunId: 1,
     nudgeAnchors: [],
     stats: { totalPrunedTokens: 0, compressRuns: 0, dispatches: 0 },
     updatedAt: Date.now(),
@@ -86,7 +83,6 @@ export function hydrateSessionState(json: unknown, sessionId: string): SessionSt
     base.activeBlockIds = raw.activeBlockIds.filter((id): id is number => typeof id === "number")
   }
   if (typeof raw.nextBlockId === "number") base.nextBlockId = Math.max(1, Math.floor(raw.nextBlockId))
-  if (typeof raw.nextRunId === "number") base.nextRunId = Math.max(1, Math.floor(raw.nextRunId))
   if (Array.isArray(raw.nudgeAnchors)) {
     base.nudgeAnchors = raw.nudgeAnchors.filter((id): id is number => typeof id === "number")
   }
@@ -109,7 +105,6 @@ function coerceBlock(value: unknown): CompressionBlock | undefined {
   const raw = value as Record<string, unknown>
   if (
     typeof raw.blockId !== "number" ||
-    typeof raw.runId !== "number" ||
     typeof raw.topic !== "string" ||
     typeof raw.summary !== "string" ||
     typeof raw.anchorKey !== "string" ||
@@ -119,7 +114,6 @@ function coerceBlock(value: unknown): CompressionBlock | undefined {
   }
   return {
     blockId: raw.blockId,
-    runId: typeof raw.runId === "number" ? raw.runId : 0,
     active: raw.active === true,
     topic: raw.topic,
     summary: raw.summary,

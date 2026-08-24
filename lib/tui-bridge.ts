@@ -33,7 +33,6 @@ export interface DispatchMetrics {
   agent?: string
   model?: string
   messagesIn: number
-  messagesOut: number
   tokensBefore: number
   tokensAfter: number
 }

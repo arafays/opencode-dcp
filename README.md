@@ -58,11 +58,12 @@ Note: the automatic TUI companion load only applies to packages installed via
 unless you separately register the TUI module (e.g. a `cli.json` `plugins`
 entry or a file under `~/.config/opencode/plugins/tui/`).
 
-> Requires OpenCode V2 (`opencode2`). The plugin API is beta; the package pins
-> `@opencode-ai/plugin@0.0.0-beta-17887` **exactly** (a caret range over a
-> prerelease admits any lexically-greater junk tag, e.g. `windows-fix`, which
-> breaks resolution). Republish compatible updates when the
-> V2 plugin contract changes.
+> Requires OpenCode V2 (`opencode2`). OpenCode V2 auto-updates, so the package
+> tracks `@opencode-ai/plugin@beta` (the dist-tag resolves to the latest tagged
+> beta at install time; the committed lockfile pins the exact resolved version
+> for local dev). Don't use a caret range (`^0.0.0-beta-…`) — npm treats any
+> lexically-greater `0.0.0-*` prerelease as satisfying the range, and junk tags
+> like `windows-fix` lack the `Plugin` export.
 
 ## How it works
 
