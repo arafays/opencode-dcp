@@ -101,10 +101,10 @@ export function pruneToolDefinition(deps: PruneDeps) {
     name: PRUNE_TOOL_NAME,
     description: PRUNE_RANGE,
     input: INPUT_SCHEMA,
-    // Keep the default `codemode: true`: the tool is exposed through the
-    // CodeMode `execute` catalog, which is how models reach it in V2. Setting
-    // `codemode: false` removes it from that catalog and makes it callable by
-    // nothing.
+    // Explicitly expose through the CodeMode `execute` catalog: that is how the
+    // model reaches this tool in V2. The `codemode` default is not guaranteed
+    // across beta releases, so set it explicitly rather than relying on it.
+    options: { codemode: true },
     execute: async (input: unknown, context: PruneToolContext) => {
       let args: PruneToolArgs
       try {
@@ -139,6 +139,7 @@ export function pruneToolDefinition(deps: PruneDeps) {
       await context.progress?.({ title: `DCP: pruning "${args.topic}"` })
 
       let totalNewMessages = 0
+      let toolsCovered = 0
       let tokensCovered = 0
       let tokensSummaries = 0
       let lastBlockId = 0
@@ -163,6 +164,7 @@ export function pruneToolDefinition(deps: PruneDeps) {
             0,
           )
           totalNewMessages += Math.max(0, plan.coveredKeys.length - consumedCoverage)
+          toolsCovered += plan.coveredToolIds.length
           tokensCovered += Math.max(0, plan.coveredTokens)
           tokensSummaries += Math.max(0, block.summaryTokens)
           lastBlockId = block.blockId
@@ -183,6 +185,7 @@ export function pruneToolDefinition(deps: PruneDeps) {
             topic: args.topic,
             ranges: plans.length,
             messagesCovered: totalNewMessages,
+            toolsCovered,
             tokensBefore: tokensCovered,
             tokensAfter: tokensSummaries,
             tokensSaved: Math.max(0, tokensCovered - tokensSummaries),

@@ -1,10 +1,13 @@
 /**
- * Registers user-facing slash commands. V2 commands expand templates into the
- * conversation; `$ARGUMENTS` receives whatever the user typed after the
- * command. `/dcp-prune` instructs the model to run a pruning pass
- * immediately - the model then calls the `prune` tool itself, which keeps
- * permission handling and validation inside the tool.
+ * Registers user-facing slash commands. V2 commands contribute to the
+ * conversation by re-prompting with assembled text via `ctx.session.prompt`.
+ * `/dcp-prune` instructs the model to run a pruning pass immediately - the
+ * model then calls the `prune` tool itself, which keeps permission handling
+ * and validation inside the tool.
  */
+
+import type { CommandDraft, CommandDefinition, CommandInvocation } from "@opencode-ai/plugin/promise/command"
+import type { Plugin } from "@opencode-ai/plugin"
 
 function dcpPruneTemplate(): string {
   return [
@@ -18,15 +21,24 @@ function dcpPruneTemplate(): string {
 
 const DCP_PRUNE_DESCRIPTION = "Trigger DCP manual pruning with: /dcp-prune [focus]"
 
-/** Minimal structural view of a command draft entry (client CommandInfo). */
-interface CommandDraftLike {
-  update(name: string, update: (command: { name?: string; template?: string; description?: string }) => void): void
-}
-
-/** Applies DCP command definitions to the command draft. */
-export function registerCommands(draft: CommandDraftLike): void {
-  draft.update("dcp-prune", (command) => {
-    command.description = DCP_PRUNE_DESCRIPTION
-    command.template = dcpPruneTemplate()
-  })
+/**
+ * Registers DCP command definitions on the command draft. The `dcp-prune`
+ * command re-prompts the session with a reminder instructing the model to call
+ * the `prune` tool; the user's trailing text becomes the optional focus.
+ */
+export function registerCommands(draft: CommandDraft, ctx: Plugin.Context): void {
+  draft.add({
+    name: "dcp-prune",
+    description: DCP_PRUNE_DESCRIPTION,
+    execute: async (input: CommandInvocation) => {
+      const focus = typeof input.prompt.text === "string" ? input.prompt.text.trim() : ""
+      const text = dcpPruneTemplate().replaceAll("$ARGUMENTS", focus)
+      await ctx.session.prompt({
+        ...input.prompt,
+        sessionID: input.sessionID,
+        text,
+        delivery: input.delivery,
+      } as Parameters<typeof ctx.session.prompt>[0])
+    },
+  } satisfies CommandDefinition)
 }

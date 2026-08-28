@@ -45,15 +45,15 @@
   },
   "dependencies": {
     "@opencode-ai/plugin": "beta",
-    "@opentui/core": "^0.5.7",
-    "@opentui/solid": "^0.5.7",
-    "solid-js": "^1.9.15"
+    "@opentui/core": "0.5.9",
+    "@opentui/solid": "0.5.9",
+    "solid-js": "1.9.15"
   },
   "devDependencies": {
-    "@types/node": "^25.9.5",
-    "tsup": "^8.5.1",
-    "tsx": "^4.23.12",
-    "typescript": "^5.9.3"
+    "@types/node": "25.9.5",
+    "tsup": "8.5.1",
+    "tsx": "4.23.12",
+    "typescript": "5.9.3"
   },
   "engines": {
     "node": ">=22"

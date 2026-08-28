@@ -183,7 +183,7 @@ export default Plugin.define({
     })
 
     await ctx.command.transform((draft) => {
-      registerCommands(draft)
+      registerCommands(draft, ctx)
     })
 
     // Background event pump; aborted when the plugin unloads.

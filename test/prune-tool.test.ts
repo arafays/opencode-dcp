@@ -7,6 +7,7 @@ import { createLogger } from "../lib/logger"
 import { StateStore } from "../lib/state/store"
 import { TranscriptMirror } from "../lib/transcript/mirror"
 import { scanTranscript } from "../lib/transcript/scan"
+import type { CompressionEventRecord } from "../lib/tui-bridge"
 import type { ToolResultPart, WireMessage } from "../lib/types"
 
 const CONFIG = resolveOptions(undefined, () => {})
@@ -28,7 +29,10 @@ function fixture(): WireMessage[] {
     {
       id: "a2",
       role: "assistant",
-      content: [{ type: "text", text: "findings so far" }],
+      content: [
+        { type: "tool-call", id: "c2", name: "grep", input: { pattern: "auth" } },
+        { type: "text", text: "findings so far" },
+      ],
     },
     {
       id: "t2",
@@ -58,6 +62,7 @@ function harness() {
   const messages = fixture()
   const index = scanTranscript(messages)
   mirror.update(SESSION, index)
+  const compressions: CompressionEventRecord[] = []
   const tool = pruneToolDefinition({
     store,
     mirror,
@@ -65,13 +70,14 @@ function harness() {
     config: CONFIG,
     getModelContextLimit: () => 200_000,
     getUsageTokens: () => 0,
+    recordCompression: (input) => compressions.push(input.record),
   })
   const run = (input: unknown) => tool.execute(input, { sessionID: SESSION })
-  return { store, index, messages, run }
+  return { store, index, messages, run, compressions }
 }
 
 test("prune records a block covering the selected range", async () => {
-  const { store, index, run } = harness()
+  const { store, index, run, compressions } = harness()
   const runtime = await store.ensure(SESSION)
   for (const key of index.keys) runtime.refs.ensure(key)
 
@@ -90,10 +96,17 @@ test("prune records a block covering the selected range", async () => {
   assert.equal(block.anchorKey, "id:t2")
   assert.deepEqual(block.coveredToolIds, ["c1"])
   assert.equal(state.stats.compressRuns, 1)
+
+  // TUI bridge record: one message range, one pruned tool output.
+  assert.equal(compressions.length, 1)
+  assert.equal(compressions[0]?.topic, "Auth exploration")
+  assert.equal(compressions[0]?.messagesCovered, 4)
+  assert.equal(compressions[0]?.toolsCovered, 1)
+  assert.equal(compressions[0]?.tokensSaved, Math.max(0, compressions[0]!.tokensBefore - compressions[0]!.tokensAfter))
 })
 
 test("prune consumes intersected blocks and expands their placeholders", async () => {
-  const { store, index, run } = harness()
+  const { store, index, run, compressions } = harness()
   const runtime = await store.ensure(SESSION)
   for (const key of index.keys) runtime.refs.ensure(key)
 
@@ -120,6 +133,12 @@ test("prune consumes intersected blocks and expands their placeholders", async (
   assert.match(secondBlock.summary, /plus more detail/)
   assert.match(secondBlock.summary, /<dcp-message-id>b2<\/dcp-message-id>/)
   assert.match(String(second.content), /b2/)
+
+  // Second record folds the consumed block: 1 net new message, both tool
+  // outputs (c1 from the folded block, c2 from the new range) counted.
+  assert.equal(compressions.length, 2)
+  assert.equal(compressions[1]?.messagesCovered, 1)
+  assert.equal(compressions[1]?.toolsCovered, 2)
 })
 
 test("prune drops a consumed block whose placeholder is omitted", async () => {

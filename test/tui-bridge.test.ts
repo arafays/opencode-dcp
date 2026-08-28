@@ -119,6 +119,7 @@ test("buildStatsSnapshot caps recent compressions at 10", () => {
         topic: `t${index}`,
         ranges: 1,
         messagesCovered: 2,
+        toolsCovered: 3,
         tokensBefore: 100,
         tokensAfter: 20,
         tokensSaved: 80,
@@ -138,6 +139,7 @@ test("buildStatsSnapshot caps recent compressions at 10", () => {
   const list = snapshot?.sessions.s?.recentCompressions ?? []
   assert.equal(list.length, 10)
   assert.equal(list.at(-1)?.topic, "t13")
+  assert.equal(list.at(-1)?.toolsCovered, 3)
 })
 
 test("sessionTotals summarizes active blocks and pruning", () => {

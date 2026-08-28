@@ -23,6 +23,8 @@ export interface CompressionEventRecord {
   topic: string
   ranges: number
   messagesCovered: number
+  /** Tool outputs swallowed by this compression (absent in older snapshots). */
+  toolsCovered?: number
   tokensBefore: number
   tokensAfter: number
   tokensSaved: number

@@ -1,5 +1,4 @@
 {
-  "plugins": [
-    "../tui.tsx"
-  ]
+  "$schema": "https://opencode.ai/v2/cli.json",
+  "plugins": ["../tui.tsx"]
 }

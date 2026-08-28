@@ -11,7 +11,7 @@ npm install
 npm run typecheck                          # tsc --noEmit (strict); run this first
 npm test                                   # node --import tsx --test test/*.test.ts
 node --import tsx --test test/prune.test.ts  # single test file
-npm run build                              # tsup -> dist/
+npm run build                              # tsup (JS) -> dist/, then native tsc emits dist/**/*.d.ts
 ```
 
 - Tests use `node:test` + `tsx` (no vitest/jest). Pure unit tests: build fixtures as `WireMessage[]`; no server or network needed.
@@ -20,6 +20,7 @@ npm run build                              # tsup -> dist/
 
 ## Gotchas
 
+- **TypeScript 7 (native) has no JS Compiler API**: anything that `require("typescript")`s internals breaks (this killed tsup's `dts: true` via rollup-plugin-dts). Declarations must be emitted by the compiler CLI (`tsconfig.build.json`) — keep `dts: false` in tsup.config until TS 7.1's programmatic API ships. The `scripts/fix-dts-extensions.mjs` postbuild makes emitted relative specifiers nodenext-safe.
 - **Rebuild before live testing**: `.opencode/opencode.json` loads the plugin from `../dist/index.js`. Source edits have no effect in an OpenCode session until `npm run build`. (`dist/` is gitignored.)
 - **Never `npm pack` before `npm publish`**: `prepublishOnly` runs tsup with `clean: true`, wiping `dist/`. Pack *after* publishing. (CI is safe: `release.yml` builds explicitly and publishes with `--ignore-scripts`.)
 - **Dependency pinning**: `@opencode-ai/plugin` uses the `beta` dist-tag in `package.json`; the lockfile pins the exact resolved version. Never use a caret range (`^0.0.0-beta-…`) — npm treats any lexically-greater `0.0.0-*` prerelease tag as satisfying the range, and those builds lack the `Plugin` export.

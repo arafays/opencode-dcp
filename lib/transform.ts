@@ -102,9 +102,16 @@ export function createContextHook(deps: TransformDeps) {
 
       applyCompressionBlocks(runtime.state, messages, index.keys)
       pruneToolOutputs(runtime.state, messages, deps.config)
-      injectBoundaryTags(runtime.refs.byKey, messages, index.keys)
 
-      await injectNudges(deps, event, index.keys.length, runtime.state)
+      // `messages` was mutated by the transforms above (covered ranges removed,
+      // synthetic block messages spliced), so its indices no longer line up with
+      // the pre-compression `index.keys`. Re-scan to get the post-compression key
+      // list before injecting boundary tags, otherwise the model sees misaligned
+      // (and conflicting) mNNNN IDs after the first compression.
+      const postIndex = scanTranscript(messages)
+      injectBoundaryTags(runtime.refs.byKey, messages, postIndex.keys)
+
+      await injectNudges(deps, event, postIndex.keys.length, runtime.state)
 
       publishDispatchStats(deps, {
         sessionId,

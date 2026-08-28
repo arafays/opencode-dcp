@@ -1,7 +1,7 @@
 /** @jsxImportSource @opentui/solid */
 
 import { Plugin } from "@opencode-ai/plugin/tui"
-import { For, Show } from "solid-js"
+import { createEffect, createSignal, For, onCleanup, Show } from "solid-js"
 
 /**
  * DCP TUI companion. Loaded by the OpenCode TUI from this package's `./tui`
@@ -17,6 +17,12 @@ import { For, Show } from "solid-js"
  * Server-side plugin options are NOT visible here; disabling the server side
  * (`{ "tui": { "enabled": false } }` on the server plugin) stops stats writes,
  * after which this companion renders nothing.
+ *
+ * Besides the footer line and the on-demand report, a prune-summary card is
+ * claimed at the `session.composer.top` slot (between the transcript and the
+ * composer — the slot tree has no transcript-inline anchor). It pops when a
+ * prune compression lands and auto-hides after `options.cardSeconds`
+ * (default 30); the "DCP: toggle prune summary card" palette command pins it.
  */
 
 interface CompressionEventRecord {
@@ -25,6 +31,7 @@ interface CompressionEventRecord {
   topic: string
   ranges: number
   messagesCovered: number
+  toolsCovered?: number
   tokensBefore: number
   tokensAfter: number
   tokensSaved: number
@@ -65,6 +72,11 @@ interface StatsSnapshot {
 
 const EMPTY_STATS: StatsSnapshot = { version: 1, generatedAt: 0, sessions: {} }
 
+/** How long the prune-summary card stays above the composer after a prune. */
+const DEFAULT_CARD_TTL_SECONDS = 30
+/** Character width of the card's context-usage bar. */
+const CONTEXT_BAR_WIDTH = 28
+
 function fmtTokens(value: number): string {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
   if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`
@@ -75,6 +87,17 @@ function fmtTime(at: number): string {
   if (!at) return "-"
   const date = new Date(at)
   return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}:${String(date.getSeconds()).padStart(2, "0")}`
+}
+
+function fmtDate(at: number): string {
+  if (!at) return "-"
+  return new Date(at).toLocaleDateString()
+}
+
+/** Fixed-width context bar: `█` for used context, `·` for headroom. */
+function contextBar(percent: number, width: number): string {
+  const filled = Math.max(0, Math.min(width, Math.round((percent / 100) * width)))
+  return "█".repeat(filled) + "·".repeat(width - filled)
 }
 
 export default Plugin.define({
@@ -118,6 +141,190 @@ export default Plugin.define({
           </Show>
         )
       },
+    })
+
+    // Prune-summary card. The slot tree publishes no transcript-inline slot
+    // (tool parts are host-rendered), so the closest anchor to "in between the
+    // session transcript, right after the prune tool runs" is
+    // "session.composer.top": the boundary between the transcript and the
+    // composer. The card pops the moment a compression record lands in the
+    // stats store, then auto-hides after `cardSeconds` (default 30); the
+    // "DCP: toggle prune summary card" palette command pins it for the
+    // session. Shared pin state lives at setup scope so both the slot render
+    // and the keymap layer read the same signal.
+    const [cardPinned, setCardPinned] = createSignal(false)
+
+    const CompressionCard = (props: { sessionID: string }) => {
+      const cardSeconds = options.cardSeconds
+      const ttlMs =
+        typeof cardSeconds === "number" && cardSeconds > 0 ? cardSeconds * 1000 : DEFAULT_CARD_TTL_SECONDS * 1000
+
+      const entry = () => sessionStats(props.sessionID)
+      const latest = () => {
+        const current = entry()
+        const recent = current?.recentCompressions
+        return recent && recent.length > 0 ? recent[recent.length - 1] : undefined
+      }
+
+      const [flashed, setFlashed] = createSignal(false)
+      const visible = () => cardPinned() || flashed()
+
+      // Flash only on arrivals: the first observation of a session (TUI open,
+      // session switch) is a baseline, so stale history never pops the card.
+      // A compression that lands while the card is mounted — the prune tool
+      // just returned — starts the auto-hide timer.
+      createEffect((previous: { sessionID: string; at?: number } | undefined) => {
+        const at = latest()?.at
+        if (previous && previous.sessionID !== props.sessionID) {
+          setFlashed(false)
+        } else if (previous && at && at > (previous.at ?? 0)) {
+          setFlashed(true)
+          const timer = setTimeout(() => setFlashed(false), ttlMs)
+          onCleanup(() => clearTimeout(timer))
+        }
+        return { sessionID: props.sessionID, at }
+      })
+
+      // Context usage from the same source the sidebar's Context section
+      // reads: the last assistant token report after the last completed
+      // compaction (respecting a revert boundary), matched against the
+      // session model's context limit.
+      const usage = () => {
+        const session = ctx.data.session.get(props.sessionID)
+        const messages = ctx.data.session.message.list(props.sessionID)
+        if (!session || !messages?.length) return undefined
+        const boundary = session.revert?.messageID
+        const boundaryIndex = boundary ? messages.findIndex((message) => message.id === boundary) : -1
+        if (boundary && boundaryIndex === -1) return undefined
+        const end = boundaryIndex === -1 ? messages.length : boundaryIndex
+        const compactionIndex = messages.findLastIndex(
+          (message, index) => message.type === "compaction" && message.status === "completed" && index < end,
+        )
+        const last = messages.findLast(
+          (message, index) =>
+            message.type === "assistant" &&
+            message.tokens !== undefined &&
+            index > compactionIndex &&
+            index < end,
+        )
+        if (!last || last.type !== "assistant" || !last.tokens) return undefined
+        const tokens =
+          last.tokens.input +
+          last.tokens.output +
+          last.tokens.reasoning +
+          last.tokens.cache.read +
+          last.tokens.cache.write
+        if (tokens <= 0) return undefined
+        const models = ctx.data.location.model.list(session.location)
+        const model = models?.find(
+          (candidate) => candidate.providerID === last.model.providerID && candidate.id === last.model.id,
+        )
+        const limit = model?.limit.context
+        return {
+          tokens,
+          limit,
+          percent: limit && limit > 0 ? Math.round((tokens / limit) * 100) : undefined,
+        }
+      }
+
+      // Cumulative savings: tool-output pruning plus the net tokens reclaimed
+      // by active compression blocks (original content minus summary cost).
+      const totalSaved = () => {
+        const current = entry()
+        if (!current) return 0
+        return (
+          Math.max(0, current.totals.prunedTokensTotal) +
+          Math.max(0, current.totals.blockTokensCovered - current.totals.blockTokensSummaries)
+        )
+      }
+
+      const severity = (percent: number) =>
+        percent >= 85
+          ? ctx.theme.text.feedback.error.default
+          : percent >= 60
+            ? ctx.theme.text.feedback.warning.default
+            : ctx.theme.text.feedback.success.default
+
+      const contextLabel = (value: { tokens: number; limit?: number; percent?: number }) => {
+        const head = value.percent !== undefined ? ` ${String(value.percent)}%` : ` ${fmtTokens(value.tokens)}`
+        return value.limit ? `${head} of ${fmtTokens(value.limit)} context` : `${head} in context`
+      }
+
+      return (
+        <Show when={visible() ? latest() : undefined}>
+          {(record: () => CompressionEventRecord) => {
+            const savedPercent = () =>
+              record().tokensBefore > 0 ? Math.round((record().tokensSaved / record().tokensBefore) * 100) : 0
+            const context = () => usage()
+            return (
+              <box
+                border
+                borderStyle="rounded"
+                borderColor={ctx.theme.border.default}
+                marginTop={1}
+                marginLeft={3}
+                marginRight={2}
+                paddingLeft={2}
+                paddingRight={2}
+                flexDirection="column"
+              >
+                <text>
+                  <span style={{ fg: ctx.theme.text.feedback.success.default }}>▪ DCP</span>
+                  <span style={{ fg: ctx.theme.text.subdued }}> │ </span>
+                  <span style={{ fg: ctx.theme.text.default }}>
+                    ~{fmtTokens(totalSaved())} tokens saved total
+                  </span>
+                </text>
+                <Show when={context()}>
+                  {(value: () => NonNullable<ReturnType<typeof usage>>) => (
+                    <text>
+                      <span style={{ fg: severity(value().percent ?? 0) }}>
+                        {contextBar(value().percent ?? 0, CONTEXT_BAR_WIDTH)}
+                      </span>
+                      <span style={{ fg: ctx.theme.text.subdued }}>{contextLabel(value())}</span>
+                    </text>
+                  )}
+                </Show>
+                <text>
+                  <span style={{ fg: ctx.theme.text.subdued }}>▪ </span>
+                  <span style={{ fg: ctx.theme.text.default }}>
+                    Compression #{String(entry()?.totals.compressRuns ?? 0)}{" "}
+                  </span>
+                  <span style={{ fg: ctx.theme.text.subdued }}>(</span>
+                  <span style={{ fg: ctx.theme.text.feedback.success.default }}>
+                    ~{fmtTokens(record().tokensSaved)} tokens
+                  </span>
+                  <span style={{ fg: ctx.theme.text.subdued }}>
+                    {" "}
+                    removed, {String(savedPercent())}% reduction)
+                  </span>
+                </text>
+                <text>
+                  <span style={{ fg: ctx.theme.text.subdued }}>→ Topic: </span>
+                  <span style={{ fg: ctx.theme.text.default }}>{record().topic}</span>
+                </text>
+                <text>
+                  <span style={{ fg: ctx.theme.text.subdued }}>→ Items: </span>
+                  <span style={{ fg: ctx.theme.text.default }}>
+                    {String(record().messagesCovered)} message{record().messagesCovered === 1 ? "" : "s"}
+                    {record().toolsCovered === undefined
+                      ? " compressed"
+                      : ` and ${String(record().toolsCovered)} tool${record().toolsCovered === 1 ? "" : "s"} compressed`}
+                  </span>
+                </text>
+                <text fg={ctx.theme.text.subdued}>
+                  {fmtTime(record().at)} · {fmtDate(record().at)}
+                </text>
+              </box>
+            )
+          }}
+        </Show>
+      )
+    }
+
+    const disposeCard = ctx.ui.slot({
+      append: "session.composer.top",
+      render: (input) => <CompressionCard sessionID={input.sessionID} />,
     })
 
     // Detailed report on demand: command palette → "DCP: compression report".
@@ -192,7 +399,11 @@ export default Plugin.define({
                               {(record: CompressionEventRecord) => (
                                 <text>
                                   {fmtTime(record.at)} · {record.topic} · {record.ranges} range
-                                  {record.ranges === 1 ? "" : "s"} · {record.messagesCovered} msg ·{" "}
+                                  {record.ranges === 1 ? "" : "s"} · {record.messagesCovered} msg
+                                  {record.toolsCovered === undefined
+                                    ? ""
+                                    : ` · ${String(record.toolsCovered)} tool${record.toolsCovered === 1 ? "" : "s"}`}{" "}
+                                  ·{" "}
                                   <span style={{ fg: ctx.theme.text.feedback.success.default }}>
                                     −{fmtTokens(record.tokensSaved)} tok
                                   </span>
@@ -208,6 +419,14 @@ export default Plugin.define({
               })
             },
           },
+          {
+            id: "dcp.compression-card",
+            title: "DCP: toggle prune summary card",
+            description: "Pin or unpin the prune summary card shown between the transcript and the prompt",
+            group: "DCP",
+            palette: true,
+            run: () => setCardPinned((value) => !value),
+          },
         ],
       }))
       return null
@@ -218,6 +437,7 @@ export default Plugin.define({
     // Slot claims are owned by the plugin scope and released automatically.
     return () => {
       disposeFooter()
+      disposeCard()
       disposeCommands()
     }
   },

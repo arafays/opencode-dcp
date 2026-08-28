@@ -19,6 +19,7 @@
       }
     }
   ],
+  "lsp": true,
   "references": {
     "opencode-v2": {
       "repository": "anomalyco/opencode",
