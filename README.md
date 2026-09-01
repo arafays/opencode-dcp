@@ -17,8 +17,9 @@ opencode2 plugin add opencode-dcp
 
 This installs the package into OpenCode's plugin cache and registers its server
 entrypoint in your global config. The TUI companion needs no extra step: the
-plugin's definition sets `tui: true`, so a locally connected TUI discovers the
-active plugin and loads its `./tui` export from the cache on its own. Or add it
+runtime detects the companion itself (via the package's `./tui` export), so a
+locally connected TUI discovers the active plugin and loads its `./tui` export
+from the cache on its own. Or add it
 directly to a project config:
 
 ```jsonc title=".opencode/opencode.json"
@@ -96,7 +97,7 @@ State persists per session across restarts via plugin storage.
 ## TUI panel
 
 A companion TUI module ships with the package and is **enabled by default**
-(the server definition sets `tui: true`). While a session runs it shows:
+(the runtime loads the package's `./tui` export). While a session runs it shows:
 
 - **Sidebar footer**: live outbound-token savings of the last dispatch
   (`−38% · 21.3k→13.2k tok`) plus active block count.

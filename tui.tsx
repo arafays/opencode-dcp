@@ -5,8 +5,9 @@ import { createEffect, createSignal, For, onCleanup, Show } from "solid-js"
 
 /**
  * DCP TUI companion. Loaded by the OpenCode TUI from this package's `./tui`
- * export (the server plugin sets `tui: true`). Reads the stats snapshot the
- * server-side plugin writes into
+ * export (feature-detected by the runtime: package `./tui` export or a
+ * sibling tui.* file next to the server plugin's index.*). Reads the stats
+ * snapshot the server-side plugin writes into
  * `<state>/opencode/<channel>/tui/plugin.opencode.dcp.tui.stats.json` —
  * the exact file backing `ctx.storage.store("stats")` — so updates appear
  * live while a session runs.

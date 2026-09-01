@@ -1,9 +1,8 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
-    "-opencode.dcp",
     {
-      "package": "../dist/index.js",
+      "package": "../dist",
       "options": {
         "debug": true,
         "maxContextLimit": 120000,

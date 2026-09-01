@@ -34,8 +34,9 @@ const PLUGIN_ID = "opencode.dcp"
 
 export default Plugin.define({
   id: PLUGIN_ID,
-  // Ships a TUI companion module ("./tui" export); loaded by the OpenCode TUI.
-  tui: true,
+  // Ships a TUI companion module ("./tui" export). The runtime detects it
+  // itself (package `./tui` export or sibling tui.* file) — it is not part of
+  // the `Plugin` type, and passing `tui: true` here is a type error.
   setup: async (ctx) => {
     const config = resolveOptions(ctx.options, (message) =>
       console.error(`[dcp] config warning: ${message}`),

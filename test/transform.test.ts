@@ -25,7 +25,7 @@ function fixture(): WireMessage[] {
   ]
 }
 
-function harness() {
+function harness(depsOverride: Partial<TransformDeps> = {}) {
   const store = new StateStore(undefined)
   const mirror = new TranscriptMirror()
   const deps: TransformDeps = {
@@ -36,9 +36,30 @@ function harness() {
     usage: { totalFor: () => 0 } as any,
     isSubAgent: async () => false,
     catalogContextLimit: async () => 200_000,
+    ...depsOverride,
   }
   const hook = createContextHook(deps)
   return { store, mirror, deps, hook }
+}
+
+function run(hook: ReturnType<typeof createContextHook>, messages: WireMessage[]) {
+  return hook({
+    sessionID: SESSION,
+    agent: "default",
+    model: { providerID: "p", id: "m" },
+    system: [],
+    messages,
+  })
+}
+
+/** Concatenated text of every `<dcp-system-reminder>` in the transcript. */
+function remindersOf(messages: WireMessage[]): string {
+  return messages
+    .flatMap((m) => m.content)
+    .filter((p): p is Extract<typeof p, { type: "text" }> => p.type === "text")
+    .map((p) => p.text)
+    .filter((text) => text.includes("dcp-system-reminder"))
+    .join("\n")
 }
 
 /** Returns mNNNN/bN tags attached to each outbound message, in order. */
@@ -120,4 +141,45 @@ test("boundary tags stay aligned with post-compression messages", async () => {
   )
   assert.ok(!String(second.content).startsWith("prune failed"), String(second.content))
   assert.match(String(second.content), /b2/)
+})
+
+// Regression: after a server restart or a revert/compaction commit the
+// in-memory UsageTracker is blind (0 until the second post-reset usage
+// event), so the nudge gate must not rely on it alone. The transcript
+// measurement taken in the same hook is the floor: a near-full window must
+// always arm the nudge, or the dispatch overflows the model window with a
+// provider 400 (reported: 256K tokens = 98% of a 262K window, no nudge).
+test("context nudge arms from the measured transcript when usage tracking is blind", async () => {
+  const { hook } = harness()
+
+  // 580_000 chars / 4 = ~145K tokens >= 70% of the 200K catalog window.
+  const messages: WireMessage[] = [
+    { id: "u1", role: "user", content: [{ type: "text", text: `context${"x".repeat(580_000)}` }] },
+  ]
+  await run(hook, messages)
+
+  const reminders = remindersOf(messages)
+  assert.match(reminders, /Context at ~\d+% of budget/)
+  // The reminder rides the synthetic message appended at the transcript tail.
+  const last = messages.at(-1)!
+  assert.equal(last.role, "user")
+  const part = last.content[0]!
+  const text = part.type === "text" ? part.text : ""
+  assert.match(text, /dcp-system-reminder/)
+})
+
+test("small transcript with a blind tracker stays silent", async () => {
+  const { hook } = harness()
+  const messages = fixture()
+  await run(hook, messages)
+  assert.equal(remindersOf(messages), "")
+})
+
+test("provider-reported usage above budget still arms the nudge", async () => {
+  // Max() semantics: the tracker estimate wins when it exceeds the
+  // measurement (small fixture measures ~0, tracker reports 150K = 75%).
+  const { hook } = harness({ usage: { totalFor: () => 150_000 } as any })
+  const messages = fixture()
+  await run(hook, messages)
+  assert.match(remindersOf(messages), /Context at ~75% of budget/)
 })

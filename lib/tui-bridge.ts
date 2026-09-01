@@ -75,7 +75,10 @@ export interface TuiStatsSnapshot {
 export const TUI_STATS_KEY = "plugin.opencode.dcp.tui.stats"
 const MAX_RECENT_COMPRESSIONS = 10
 
-/** Cheap token estimate (~4 chars/token) used for display-only deltas. */
+/**
+ * Cheap token estimate (~4 chars/token) for display-only deltas and as the
+ * always-available floor of the context-nudge gate (see `injectNudges`).
+ */
 export function estimateTokens(chars: number): number {
   return Math.max(0, Math.round(chars / 4))
 }

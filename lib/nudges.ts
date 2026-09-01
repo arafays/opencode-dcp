@@ -3,9 +3,13 @@ import { resolveLimit } from "./config"
 import { CONTEXT_LIMIT_NUDGE, ITERATION_NUDGE } from "./prompts"
 
 /**
- * Context-pressure nudges. Usage numbers come from provider usage events
- * (`session.usage.updated`), tracked per session by the event pump. When the
- * tracked usage crosses the configured budget, a reminder is appended to the
+ * Context-pressure nudges. Context occupancy is estimated two ways, and the
+ * larger of the two arms the reminder (see `injectNudges` in transform.ts):
+ * provider usage events (`session.usage.updated`, tracked per session by the
+ * event pump) and the per-dispatch transcript measurement taken in the
+ * context hook - the measurement is the floor that keeps the gate armed when
+ * the tracker is blind (process restart, revert/compaction reset). When the
+ * estimate crosses the configured budget, a reminder is appended to the
  * outbound transcript asking the model to run `prune`.
  *
  * Rate limiting: at most one active nudge per

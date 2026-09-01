@@ -184,7 +184,18 @@ async function injectNudges(
 ): Promise<void> {
   const reminders: string[] = []
 
-  const usageTokens = deps.usage.totalFor(event.sessionID)
+  // Context pressure is the max of two independent estimates:
+  // - the provider-reported usage delta (`UsageTracker`). Exact while warm,
+  //   but blind to 0 across a full baseline-rebuild window: after a process
+  //   restart or a revert/compaction reset, the first `session.usage.updated`
+  //   only re-arms the baseline and only the second produces a delta.
+  // - the measured transcript size (this hook, post-transforms, ~4 chars per
+  //   token). Always available, slightly rough (excludes the system prompt).
+  // The max keeps the nudge armed for near-full windows even when the tracker
+  // is blind - without it, a ~98%-of-window transcript dispatched right after
+  // a restart/revert is never asked to prune and can overflow the window.
+  const measuredTokens = estimateTokens(measureMessagesChars(event.messages))
+  const usageTokens = Math.max(deps.usage.totalFor(event.sessionID), measuredTokens)
   if (usageTokens > 0) {
     const limit =
       (await deps.catalogContextLimit(event.model.providerID, event.model.id)) ?? 200_000
