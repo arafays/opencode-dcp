@@ -43,7 +43,7 @@ point config at the local entrypoint:
 {
   "plugins": [
     {
-      "package": "../dist/index.js",
+      "package": "../dist",
       "options": {
         "debug": true,
         "maxContextLimit": "70%",
@@ -54,10 +54,10 @@ point config at the local entrypoint:
 }
 ```
 
-Note: the automatic TUI companion load only applies to packages installed via
-`plugin add`. With a local-path entry like above, the sidebar/report stay off
-unless you separately register the TUI module (e.g. a `cli.json` `plugins`
-entry or a file under `~/.config/opencode/plugins/tui/`).
+The build copies `tui.tsx` next to `dist/index.js`, and the runtime auto-loads a
+sibling `tui.*` file beside a local plugin's `index.*` entrypoint — so the
+companion loads for this local-path entry too, exactly like the `./tui` export
+does for package installs.
 
 > Requires OpenCode V2 (`opencode2`). OpenCode V2 auto-updates, so the package
 > tracks `@opencode-ai/plugin@beta` (the dist-tag resolves to the latest tagged
@@ -99,8 +99,12 @@ State persists per session across restarts via plugin storage.
 A companion TUI module ships with the package and is **enabled by default**
 (the runtime loads the package's `./tui` export). While a session runs it shows:
 
-- **Sidebar footer**: live outbound-token savings of the last dispatch
-  (`−38% · 21.3k→13.2k tok`) plus active block count.
+- **Prompt footer status**: live outbound-token savings of the last dispatch
+  (`DCP −38% · 8.1k pruned`).
+- **Prune summary card** above the composer: pops when a compression lands and
+  auto-hides after 30 seconds — cumulative savings, a context-usage bar for the
+  session model, and the compression's topic/size. Command palette →
+  "DCP: toggle prune summary card" pins it for the session.
 - **Command palette → "DCP: compression report"**: per-session totals
   (dispatches, compressions, blocks), last-dispatch delta, cumulative token
   savings from blocks and pruning, and the most recent compression events.

@@ -20,13 +20,9 @@ npm run build                              # tsup (JS) -> dist/, then native tsc
 
 ## Gotchas
 
-- **TypeScript 7 (native) has no JS Compiler API**: anything that `require("typescript")`s internals breaks (this killed tsup's `dts: true` via rollup-plugin-dts). Declarations must be emitted by the compiler CLI (`tsconfig.build.json`) — keep `dts: false` in tsup.config until TS 7.1's programmatic API ships. The `scripts/fix-dts-extensions.mjs` postbuild makes emitted relative specifiers nodenext-safe.
 - **Rebuild before live testing**: `.opencode/opencode.json` loads the plugin from `../dist` (a directory — since beta-18743 a configured local plugin target must be a directory containing `index.ts`/`index.js`; a file path is dropped with "configured plugin path must be a directory"). Source edits have no effect in an OpenCode session until `npm run build`. (`dist/` is gitignored.)
 - **Never `npm pack` before `npm publish`**: `prepublishOnly` runs tsup with `clean: true`, wiping `dist/`. Pack *after* publishing. (CI is safe: `release.yml` builds explicitly and publishes with `--ignore-scripts`.)
 - **Dependency pinning**: `@opencode-ai/plugin` uses the `beta` dist-tag in `package.json`; the lockfile pins the exact resolved version. Never use a caret range (`^0.0.0-beta-…`) — npm treats any lexically-greater `0.0.0-*` prerelease tag as satisfying the range, and those builds lack the `Plugin` export.
-- **Global + dev plugin collision**: two instances of the same plugin ID kill server start with `Duplicate plugin ID: opencode.dcp`. While the npm package is enabled globally, `.opencode/opencode.json` must list `"-opencode.dcp"` (remove-operation, processed after global entries) before its local-path entry. (Currently the global config has no DCP entry, so the line is omitted.)
-- **TUI option shape**: `tui` must be an object (`{ "enabled": false }`), not a bare boolean (used to crash `resolveOptions`).
-- **TUI companion auto-load requires a package install**: the TUI only auto-loads a server plugin's `./tui` export when the plugin's source type is `package` (installed via `plugin add`). Local-path entries (`../dist`) don't get the sidebar/report.
 
 ## Release
 
@@ -43,7 +39,7 @@ Publishing is npm OIDC trusted publishing (no `NPM_TOKEN` secret); auth/provenan
 
 ## Beta API
 
-The V2 plugin API is beta and moving between releases. When `@opencode-ai/plugin` types disagree with runtime behavior, check the opencode-v2 source rather than trusting either alone. `index.ts` carries an arity-based `addTool` shim because `tools.add` changed signature across beta generations. As of beta-18743, `Plugin` is `{ id, vcs?, setup }`: the runtime feature-detects companions itself (package `./tui` export; sibling `tui.*` file next to `index.*` for local-path entries), so don't re-add `tui: true` to `Plugin.define` — it is a type error there.
+The V2 plugin API is beta and moving between releases. When `@opencode-ai/plugin` types disagree with runtime behavior, check the opencode-v2 source rather than trusting either alone. 
 
 ## Reference repos (wired in `.opencode/opencode.json`)
 

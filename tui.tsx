@@ -13,8 +13,8 @@ import { createEffect, createSignal, For, onCleanup, Show } from "solid-js"
  * live while a session runs.
  *
  * Enabled by default; disable via the TUI-side registration options
- * (`options.enabled === false`), e.g. in `~/.config/opencode/cli.json`:
- * `"plugins": [{ "package": ".../tui.tsx", "options": { "enabled": false } }]`.
+ * (`options.enabled === false`), e.g. in the global `~/.config/opencode/cli.json`:
+ * `"plugins": ["-opencode.dcp.tui"]` (remove-directive by plugin ID).
  * Server-side plugin options are NOT visible here; disabling the server side
  * (`{ "tui": { "enabled": false } }` on the server plugin) stops stats writes,
  * after which this companion renders nothing.
@@ -117,7 +117,7 @@ export default Plugin.define({
     // Semantic theme tokens: green when pruning paid off, amber while the
     // boundary-ID overhead of a fresh block is not yet paid back.
     const savingsColor = (percent: number) =>
-      percent >= 0 ? ctx.theme.text.success : ctx.theme.text.subdued
+      percent >= 0 ? ctx.theme.text.feedback.success.default : ctx.theme.text.subdued
 
     // Compact always-on line in the prompt footer status area.
     const disposeFooter = ctx.ui.slot({
