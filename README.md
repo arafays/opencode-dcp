@@ -100,10 +100,14 @@ A companion TUI module ships with the package and is **enabled by default**
 (the runtime loads the package's `./tui` export). While a session runs it shows:
 
 - **Prompt footer status**: live outbound-token savings of the last dispatch
-  (`DCP −38% · 8.1k pruned`).
+  (`DCP −38% · 8.1k pruned`), or — while no blocks are active — the measured
+  window pressure (`DCP idle · 62% of window`) instead of a misleading
+  `−0%` savings figure.
 - **Prune summary card** above the composer: pops when a compression lands and
   auto-hides after 30 seconds — cumulative savings, a context-usage bar for the
-  session model, and the compression's topic/size. Command palette →
+  session model, and the compression's scope: the pruned section before/after
+  token sizes (`19.5k → 0.7k tok`, with the percent scoped to the section, not
+  the whole context). Command palette →
   "DCP: toggle prune summary card" pins it for the session.
 - **Command palette → "DCP: compression report"**: per-session totals
   (dispatches, compressions, blocks), last-dispatch delta, cumulative token

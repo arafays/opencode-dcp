@@ -10,6 +10,7 @@ import {
   measureMessagesChars,
   resolveTuiStateDirs,
   writeTuiStats,
+  type CompressionEventRecord,
   type TuiStatsSnapshot,
 } from "../lib/tui-bridge"
 import { sessionTotals } from "../lib/transform"
@@ -140,6 +141,104 @@ test("buildStatsSnapshot caps recent compressions at 10", () => {
   assert.equal(list.length, 10)
   assert.equal(list.at(-1)?.topic, "t13")
   assert.equal(list.at(-1)?.toolsCovered, 3)
+})
+
+test("buildStatsSnapshot prefers store-provided history over the in-memory prior", () => {
+  // A plugin reload (dist rebuild, restart) resets the in-memory snapshot;
+  // the next publish must not rewrite the TUI file without the history the
+  // persisted store still owns.
+  const stale: CompressionEventRecord = {
+    at: 1,
+    blockId: 1,
+    topic: "stale",
+    ranges: 1,
+    messagesCovered: 2,
+    tokensBefore: 100,
+    tokensAfter: 20,
+    tokensSaved: 80,
+  }
+  const fresh: CompressionEventRecord = {
+    at: 2,
+    blockId: 2,
+    topic: "fresh",
+    ranges: 1,
+    messagesCovered: 3,
+    tokensBefore: 200,
+    tokensAfter: 30,
+    tokensSaved: 170,
+  }
+  const previous: TuiStatsSnapshot = {
+    version: 1,
+    generatedAt: 1,
+    sessions: {
+      s1: {
+        sessionId: "s1",
+        updatedAt: 1,
+        totals: {
+          dispatches: 1,
+          compressRuns: 1,
+          blocksActive: 1,
+          blocksTotal: 1,
+          blockTokensCovered: 100,
+          blockTokensSummaries: 20,
+          prunedTokensTotal: 0,
+          messagesCompressedActive: 2,
+        },
+        recentCompressions: [stale],
+      },
+    },
+  }
+
+  const snapshot = buildStatsSnapshot(previous, {
+    sessionId: "s1",
+    compression: fresh,
+    recentCompressions: [fresh],
+    totals: {
+      dispatches: 2,
+      compressRuns: 2,
+      blocksActive: 1,
+      blocksTotal: 2,
+      blockTokensCovered: 200,
+      blockTokensSummaries: 30,
+      prunedTokensTotal: 0,
+      messagesCompressedActive: 3,
+    },
+  })
+
+  const list = snapshot.sessions.s1?.recentCompressions ?? []
+  assert.equal(list.length, 1, "record already in the provided history must not duplicate")
+  assert.equal(list[0]?.topic, "fresh")
+})
+
+test("buildStatsSnapshot appends a compression missing from the provided history", () => {
+  const fresh: CompressionEventRecord = {
+    at: 2,
+    blockId: 2,
+    topic: "fresh",
+    ranges: 1,
+    messagesCovered: 3,
+    tokensBefore: 200,
+    tokensAfter: 30,
+    tokensSaved: 170,
+  }
+  const snapshot = buildStatsSnapshot(undefined, {
+    sessionId: "s1",
+    compression: fresh,
+    recentCompressions: [],
+    totals: {
+      dispatches: 2,
+      compressRuns: 2,
+      blocksActive: 1,
+      blocksTotal: 2,
+      blockTokensCovered: 200,
+      blockTokensSummaries: 30,
+      prunedTokensTotal: 0,
+      messagesCompressedActive: 3,
+    },
+  })
+  const list = snapshot.sessions.s1?.recentCompressions ?? []
+  assert.equal(list.length, 1)
+  assert.equal(list[0]?.topic, "fresh")
 })
 
 test("sessionTotals summarizes active blocks and pruning", () => {

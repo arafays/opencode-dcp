@@ -125,3 +125,36 @@ test("UsageTracker reports per-step deltas of cumulative usage events", () => {
   tracker.record("s1", { input: 100, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 })
   assert.equal(tracker.totalFor("s1"), 0)
 })
+
+test("UsageTracker seeds occupancy from transcript measurement while blind", () => {
+  const tracker = new UsageTracker()
+
+  // Blind (fresh process / post-reset): the dispatch measurement holds, so
+  // the first post-restart dispatch is not reported as 0 (issue #1).
+  tracker.seed("s1", 145_000)
+  assert.equal(tracker.totalFor("s1"), 145_000)
+
+  // Re-seeding tracks the transcript down (post-prune dispatch) as well as up.
+  tracker.seed("s1", 40_000)
+  assert.equal(tracker.totalFor("s1"), 40_000)
+
+  // Zero/undefined measurements never seed.
+  tracker.seed("s2", 0)
+  assert.equal(tracker.totalFor("s2"), 0)
+
+  // The first usage event only re-arms the baseline; the seed survives...
+  tracker.record("s1", { input: 500_000, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 })
+  assert.equal(tracker.totalFor("s1"), 40_000)
+  // ...until a real delta replaces it.
+  tracker.record("s1", { input: 540_000, output: 2, reasoning: 0, cacheRead: 0, cacheWrite: 0 })
+  assert.equal(tracker.totalFor("s1"), 40_002)
+
+  // Warm tracker ignores seeds: provider-reported deltas are the better
+  // estimate.
+  tracker.seed("s1", 145_000)
+  assert.equal(tracker.totalFor("s1"), 40_002)
+
+  // Reset drops the seed along with the baseline.
+  tracker.reset("s1")
+  assert.equal(tracker.totalFor("s1"), 0)
+})

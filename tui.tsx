@@ -49,6 +49,7 @@ interface SessionStatsSnapshot {
     messagesIn: number
     tokensBefore: number
     tokensAfter: number
+    contextLimit?: number
     savedTokens: number
     savedPercent: number
   }
@@ -119,24 +120,66 @@ export default Plugin.define({
     const savingsColor = (percent: number) =>
       percent >= 0 ? ctx.theme.text.feedback.success.default : ctx.theme.text.subdued
 
-    // Compact always-on line in the prompt footer status area.
+    // Measured outbound pressure of the last dispatch: the pre-DCP transcript
+    // size against the model's context window (percent unknown when the
+    // server could not resolve a limit). With no active blocks this is the
+    // real request size - the number that surfaces a window about to
+    // overflow, which savings figures would otherwise hide.
+    const dispatchPressure = (dispatch: NonNullable<SessionStatsSnapshot["lastDispatch"]>) => {
+      const limit = dispatch.contextLimit
+      return {
+        tokens: dispatch.tokensBefore,
+        percent: limit && limit > 0 ? Math.round((dispatch.tokensBefore / limit) * 100) : undefined,
+      }
+    }
+
+    const pressureColor = (percent: number | undefined) =>
+      percent === undefined
+        ? ctx.theme.text.subdued
+        : percent >= 85
+          ? ctx.theme.text.feedback.error.default
+          : percent >= 60
+            ? ctx.theme.text.feedback.warning.default
+            : ctx.theme.text.subdued
+
+    const pressureLabel = (pressure: { tokens: number; percent?: number }) =>
+      pressure.percent !== undefined
+        ? `${String(pressure.percent)}% of window`
+        : `${fmtTokens(pressure.tokens)} tok`
+
+    // Compact always-on line in the prompt footer status area. While blocks
+    // are active it reports last-dispatch savings; with none it must not
+    // pretend pruning is in progress (issue #1: a "DCP −0% · -955 pruned"
+    // footer next to a ~98%-of-window request read as if something were
+    // being pruned) - it shows a distinct idle state carrying the measured
+    // window pressure instead.
     const disposeFooter = ctx.ui.slot({
       append: "prompt.footer.status",
       render: (input) => {
-        const dispatch = () => sessionStats(input.sessionID)?.lastDispatch
+        const entry = () => sessionStats(input.sessionID)
+        const dispatch = () => entry()?.lastDispatch
         return (
           <Show when={dispatch()}>
             {(dispatch: () => NonNullable<SessionStatsSnapshot["lastDispatch"]>) => (
               <text>
                 <span style={{ fg: ctx.theme.text.default }}>DCP </span>
-                <span style={{ fg: savingsColor(dispatch().savedPercent) }}>
-                  {dispatch().savedPercent >= 0 ? "−" : "+"}
-                  {Math.abs(dispatch().savedPercent)}%
-                </span>
-                <span style={{ fg: ctx.theme.text.subdued }}>
-                  {" "}
-                  · {fmtTokens(dispatch().tokensBefore - dispatch().tokensAfter)} pruned
-                </span>
+                <Show
+                  when={(entry()?.totals.blocksActive ?? 0) > 0}
+                  fallback={
+                    <span style={{ fg: pressureColor(dispatchPressure(dispatch()).percent) }}>
+                      idle · {pressureLabel(dispatchPressure(dispatch()))}
+                    </span>
+                  }
+                >
+                  <span style={{ fg: savingsColor(dispatch().savedPercent) }}>
+                    {dispatch().savedPercent >= 0 ? "−" : "+"}
+                    {Math.abs(dispatch().savedPercent)}%
+                  </span>
+                  <span style={{ fg: ctx.theme.text.subdued }}>
+                    {" "}
+                    · {fmtTokens(dispatch().tokensBefore - dispatch().tokensAfter)} pruned
+                  </span>
+                </Show>
               </text>
             )}
           </Show>
@@ -254,8 +297,16 @@ export default Plugin.define({
       return (
         <Show when={visible() ? latest() : undefined}>
           {(record: () => CompressionEventRecord) => {
-            const savedPercent = () =>
-              record().tokensBefore > 0 ? Math.round((record().tokensSaved / record().tokensBefore) * 100) : 0
+            // Reduction WITHIN the pruned section (originals → summary), not
+            // of the whole context — the context bar above and the prompt
+            // footer carry the context-level picture. A bare "N% reduction"
+            // next to the bar reads as context reduction (issue #1
+            // follow-up: a 97% section figure beside a 13% bar confused
+            // exactly that way).
+            const sectionPercent = () =>
+              record().tokensBefore > 0
+                ? Math.round((record().tokensSaved / record().tokensBefore) * 100)
+                : 0
             const context = () => usage()
             return (
               <box
@@ -289,15 +340,18 @@ export default Plugin.define({
                 <text>
                   <span style={{ fg: ctx.theme.text.subdued }}>▪ </span>
                   <span style={{ fg: ctx.theme.text.default }}>
-                    Compression #{String(entry()?.totals.compressRuns ?? 0)}{" "}
+                    Compression #{String(record().blockId)}:{" "}
                   </span>
-                  <span style={{ fg: ctx.theme.text.subdued }}>(</span>
                   <span style={{ fg: ctx.theme.text.feedback.success.default }}>
-                    ~{fmtTokens(record().tokensSaved)} tokens
+                    {fmtTokens(record().tokensBefore)} → {fmtTokens(record().tokensAfter)}
+                  </span>
+                  <span style={{ fg: ctx.theme.text.subdued }}> tok in the pruned section (</span>
+                  <span style={{ fg: ctx.theme.text.feedback.success.default }}>
+                    −{fmtTokens(record().tokensSaved)}
                   </span>
                   <span style={{ fg: ctx.theme.text.subdued }}>
                     {" "}
-                    removed, {String(savedPercent())}% reduction)
+                    · {String(sectionPercent())}% of the section)
                   </span>
                 </text>
                 <text>
@@ -381,6 +435,12 @@ export default Plugin.define({
                                   {Math.abs(dispatch().savedPercent)}% outbound tokens
                                 </span>{" "}
                                 ({fmtTokens(dispatch().tokensBefore)} → {fmtTokens(dispatch().tokensAfter)})
+                                <Show when={dispatchPressure(dispatch()).percent !== undefined}>
+                                  <span style={{ fg: pressureColor(dispatchPressure(dispatch()).percent) }}>
+                                    {" "}
+                                    · {pressureLabel(dispatchPressure(dispatch()))}
+                                  </span>
+                                </Show>
                               </text>
                             )}
                           </Show>

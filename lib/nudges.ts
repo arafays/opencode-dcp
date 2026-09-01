@@ -8,7 +8,9 @@ import { CONTEXT_LIMIT_NUDGE, ITERATION_NUDGE } from "./prompts"
  * provider usage events (`session.usage.updated`, tracked per session by the
  * event pump) and the per-dispatch transcript measurement taken in the
  * context hook - the measurement is the floor that keeps the gate armed when
- * the tracker is blind (process restart, revert/compaction reset). When the
+ * the tracker is blind (process restart, revert/compaction reset), and it
+ * also reseeds the tracker itself (`UsageTracker.seed`) so the blind window
+ * supplies an estimate instead of 0. When the
  * estimate crosses the configured budget, a reminder is appended to the
  * outbound transcript asking the model to run `prune`.
  *
@@ -40,9 +42,14 @@ export function usageTotal(usage: UsageInfo | undefined): number {
  * which is what will occupy the window going forward.
  *
  * The first observation after construction/reset only establishes the
- * baseline (usage reads 0); every later event updates `current` to the
- * latest clamped delta. Reverts can decrement the cumulative row, hence
- * clamping at 0.
+ * baseline (usage reads 0, unless seeded); every later event updates
+ * `current` to the latest clamped delta. Reverts can decrement the cumulative
+ * row, hence clamping at 0.
+ *
+ * While blind (no baseline yet - fresh process, or a reset after a
+ * revert/compaction/deletion), the context hook seeds `current` from its
+ * per-dispatch transcript measurement (`seed`), so occupancy is never
+ * under-reported across the baseline-rebuild window.
  */
 export class UsageTracker {
   private readonly baseline = new Map<string, UsageInfo>()
@@ -52,11 +59,25 @@ export class UsageTracker {
     const base = this.baseline.get(sessionId)
     this.baseline.set(sessionId, { ...tokens })
     if (!base) {
-      this.current.delete(sessionId)
+      // First event after construction/reset only arms the baseline; keep any
+      // seeded estimate in place until a real delta exists.
       return
     }
     const delta = usageTotal(tokens) - usageTotal(base)
     this.current.set(sessionId, Math.max(0, delta))
+  }
+
+  /**
+   * Seeds the occupancy estimate from a dispatch-time transcript measurement
+   * while the tracker is blind (no baseline yet: fresh process, or a reset
+   * after a revert/compaction/deletion). Overwrites on every blind dispatch
+   * so the estimate tracks the transcript down (post-prune) as well as up.
+   * No-op once the tracker is warm - provider-reported deltas are the better
+   * estimate - and dropped by `reset` along with the baseline.
+   */
+  seed(sessionId: string, tokens: number): void {
+    if (tokens <= 0 || this.baseline.has(sessionId)) return
+    this.current.set(sessionId, tokens)
   }
 
   /** Estimated current context size in tokens for the session. */

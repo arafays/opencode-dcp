@@ -5,9 +5,11 @@ import { createContextHook } from "../lib/transform"
 import type { SessionContextEvent, TransformDeps } from "../lib/transform"
 import { resolveOptions } from "../lib/config"
 import { createLogger } from "../lib/logger"
+import { UsageTracker } from "../lib/nudges"
 import { StateStore } from "../lib/state/store"
 import { TranscriptMirror } from "../lib/transcript/mirror"
 import { pruneToolDefinition } from "../lib/prune-tool"
+import { estimateTokens, measureMessagesChars } from "../lib/tui-bridge"
 import type { WireMessage } from "../lib/types"
 
 const CONFIG = resolveOptions(undefined, () => {})
@@ -33,7 +35,7 @@ function harness(depsOverride: Partial<TransformDeps> = {}) {
     logger: createLogger(false),
     store,
     mirror,
-    usage: { totalFor: () => 0 } as any,
+    usage: new UsageTracker(),
     isSubAgent: async () => false,
     catalogContextLimit: async () => 200_000,
     ...depsOverride,
@@ -177,9 +179,38 @@ test("small transcript with a blind tracker stays silent", async () => {
 
 test("provider-reported usage above budget still arms the nudge", async () => {
   // Max() semantics: the tracker estimate wins when it exceeds the
-  // measurement (small fixture measures ~0, tracker reports 150K = 75%).
-  const { hook } = harness({ usage: { totalFor: () => 150_000 } as any })
+  // measurement (small fixture measures ~0, warm tracker reports 150K = 75%).
+  const tracker = new UsageTracker()
+  tracker.record(SESSION, { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 })
+  tracker.record(SESSION, { input: 150_000, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 })
+  const { hook } = harness({ usage: tracker })
   const messages = fixture()
   await run(hook, messages)
   assert.match(remindersOf(messages), /Context at ~75% of budget/)
+})
+
+test("dispatch seeds a blind usage tracker with the measured transcript", async () => {
+  // Post-restart/post-revert the tracker has no baseline; the dispatch-time
+  // measurement becomes its occupancy estimate, so `totalFor` consumers -
+  // like the prune tool's usage note - are not blind for the first dispatch.
+  const tracker = new UsageTracker()
+  const { hook } = harness({ usage: tracker })
+  const messages: WireMessage[] = [
+    { id: "u1", role: "user", content: [{ type: "text", text: `context${"x".repeat(40_000)}` }] },
+  ]
+  await run(hook, messages)
+
+  const measured = estimateTokens(measureMessagesChars(messages))
+  assert.ok(measured > 0)
+  assert.equal(tracker.totalFor(SESSION), measured)
+})
+
+test("dispatch stats carry the resolved context limit for the TUI", async () => {
+  const published: Array<Parameters<NonNullable<TransformDeps["publishStats"]>>[0]> = []
+  const { hook } = harness({ publishStats: (input) => published.push(input) })
+  await run(hook, fixture())
+
+  assert.equal(published.length, 1)
+  assert.equal(published[0]?.dispatch.contextLimit, 200_000)
+  assert.ok((published[0]?.dispatch.tokensBefore ?? 0) > 0)
 })

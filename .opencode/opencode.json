@@ -4,17 +4,9 @@
     {
       "package": "../dist",
       "options": {
+        "tui": { "enabled": true },
         "debug": true,
-        "maxContextLimit": 120000,
-        "strategies": {
-          "deduplication": {
-            "enabled": true
-          },
-          "purgeErrors": {
-            "enabled": true,
-            "turns": 4
-          }
-        }
+        "maxContextLimit": 120000
       }
     }
   ],

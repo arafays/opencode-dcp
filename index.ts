@@ -100,7 +100,15 @@ export default Plugin.define({
           compression?: CompressionEventRecord
           totals: ReturnType<typeof sessionTotals>
         }) => {
-          const next = buildStatsSnapshot(statsSnapshot, input)
+          // The persisted store owns the compression history: this in-memory
+          // snapshot resets on every plugin generation (dist rebuild, server
+          // restart), and a fresh generation must not rewrite the TUI file
+          // without the history it still displays.
+          const runtime = store.peek(input.sessionId)
+          const next = buildStatsSnapshot(statsSnapshot, {
+            ...input,
+            recentCompressions: runtime?.state.stats.recentCompressions,
+          })
           statsSnapshot = next
           writeTuiStats(next)
         }

@@ -1,4 +1,5 @@
 import type { RefRegistryJson } from "../refs"
+import { MAX_RECENT_COMPRESSIONS, type CompressionEventRecord } from "../tui-bridge"
 
 /**
  * Per-session DCP state. Everything here describes OUTBOUND-ONLY edits: the
@@ -31,6 +32,13 @@ export interface SessionStats {
   compressRuns: number
   /** Outbound dispatches observed since session creation (TUI display). */
   dispatches: number
+  /**
+   * Recent compression records for the TUI card/report. Kept in the
+   * persisted state — not just the TUI bridge's in-memory snapshot — so the
+   * history survives plugin reloads and server restarts. Capped at
+   * MAX_RECENT_COMPRESSIONS.
+   */
+  recentCompressions: CompressionEventRecord[]
 }
 
 /** callId → estimated tokens saved by pruning that output. */
@@ -58,7 +66,7 @@ export function createSessionState(sessionId: string): SessionState {
     activeBlockIds: [],
     nextBlockId: 1,
     nudgeAnchors: [],
-    stats: { totalPrunedTokens: 0, compressRuns: 0, dispatches: 0 },
+    stats: { totalPrunedTokens: 0, compressRuns: 0, dispatches: 0, recentCompressions: [] },
     updatedAt: Date.now(),
   }
 }
@@ -91,6 +99,15 @@ export function hydrateSessionState(json: unknown, sessionId: string): SessionSt
     if (typeof stats.totalPrunedTokens === "number") base.stats.totalPrunedTokens = stats.totalPrunedTokens
     if (typeof stats.compressRuns === "number") base.stats.compressRuns = stats.compressRuns
     if (typeof stats.dispatches === "number") base.stats.dispatches = stats.dispatches
+    if (Array.isArray(stats.recentCompressions)) {
+      for (const item of stats.recentCompressions) {
+        const record = coerceCompressionRecord(item)
+        if (record) base.stats.recentCompressions.push(record)
+      }
+      while (base.stats.recentCompressions.length > MAX_RECENT_COMPRESSIONS) {
+        base.stats.recentCompressions.shift()
+      }
+    }
   }
   // Drop dangling actives defensively.
   const knownBlocks = new Set(Object.keys(base.blocks))
@@ -98,6 +115,34 @@ export function hydrateSessionState(json: unknown, sessionId: string): SessionSt
     (id) => knownBlocks.has(String(id)) && base.blocks[String(id)]?.active === true,
   )
   return base
+}
+
+function coerceCompressionRecord(value: unknown): CompressionEventRecord | undefined {
+  if (typeof value !== "object" || value === null) return undefined
+  const raw = value as Record<string, unknown>
+  if (
+    typeof raw.at !== "number" ||
+    typeof raw.blockId !== "number" ||
+    typeof raw.topic !== "string" ||
+    typeof raw.ranges !== "number" ||
+    typeof raw.messagesCovered !== "number" ||
+    typeof raw.tokensBefore !== "number" ||
+    typeof raw.tokensAfter !== "number" ||
+    typeof raw.tokensSaved !== "number"
+  ) {
+    return undefined
+  }
+  return {
+    at: raw.at,
+    blockId: raw.blockId,
+    topic: raw.topic,
+    ranges: raw.ranges,
+    messagesCovered: raw.messagesCovered,
+    toolsCovered: typeof raw.toolsCovered === "number" ? raw.toolsCovered : undefined,
+    tokensBefore: raw.tokensBefore,
+    tokensAfter: raw.tokensAfter,
+    tokensSaved: raw.tokensSaved,
+  }
 }
 
 function coerceBlock(value: unknown): CompressionBlock | undefined {

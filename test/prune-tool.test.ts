@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 
-import { pruneToolDefinition } from "../lib/prune-tool"
+import { pruneToolDefinition, type PruneDeps } from "../lib/prune-tool"
 import { resolveOptions } from "../lib/config"
 import { createLogger } from "../lib/logger"
 import { StateStore } from "../lib/state/store"
@@ -24,7 +24,16 @@ function fixture(): WireMessage[] {
     {
       id: "t1",
       role: "tool",
-      content: [{ type: "tool-result", id: "c1", name: "read", result: { type: "text", value: "...auth files..." } }],
+      // Sized so a covered range reclaims >1k tokens: the usage-note test
+      // needs the post-prune percent to drop below the raw 75% figure.
+      content: [
+        {
+          type: "tool-result",
+          id: "c1",
+          name: "read",
+          result: { type: "text", value: "...auth files... " + "auth route detail. ".repeat(400) },
+        },
+      ],
     },
     {
       id: "a2",
@@ -56,7 +65,7 @@ function fixture(): WireMessage[] {
   ]
 }
 
-function harness() {
+function harness(depsOverride: Partial<PruneDeps> = {}) {
   const store = new StateStore(undefined)
   const mirror = new TranscriptMirror()
   const messages = fixture()
@@ -71,6 +80,7 @@ function harness() {
     getModelContextLimit: () => 200_000,
     getUsageTokens: () => 0,
     recordCompression: (input) => compressions.push(input.record),
+    ...depsOverride,
   })
   const run = (input: unknown) => tool.execute(input, { sessionID: SESSION })
   return { store, index, messages, run, compressions }
@@ -216,4 +226,47 @@ test("prune clears pending nudge anchors on success", async () => {
     content: [{ startId: "m0001", endId: "m0004", summary: "done deal" }],
   })
   assert.deepEqual(runtime.state.nudgeAnchors, [])
+})
+
+test("prune reports post-prune occupancy in its usage note", async () => {
+  // getUsageTokens reflects the dispatch as sent (pre-prune: a warm tracker
+  // delta predates the tool call, a seeded estimate predates the prune), so
+  // the note must subtract what this prune removes from the outbound
+  // transcript instead of telling the model the window is still near-full.
+  const { store, index, run, compressions } = harness({ getUsageTokens: () => 150_000 })
+  const runtime = await store.ensure(SESSION)
+  for (const key of index.keys) runtime.refs.ensure(key)
+
+  const result = await run({
+    topic: "Note check",
+    content: [{ startId: "m0001", endId: "m0004", summary: "done deal" }],
+  })
+
+  const record = compressions[0]!
+  // No consumed blocks in this fixture: reclaimed tokens are exactly the
+  // compression record's covered-minus-summaries delta.
+  const reclaimed = Math.max(0, record.tokensBefore - record.tokensAfter)
+  const expected = Math.round(((150_000 - reclaimed) / 200_000) * 100)
+  assert.ok(!String(result.content).startsWith("prune failed"), String(result.content))
+  assert.match(String(result.content), new RegExp(`approximately ${expected}% of the window`))
+  assert.ok(expected < 75, "note must drop below the pre-prune 75% occupancy")
+})
+
+test("prune persists the compression record in the session stats", async () => {
+  // The TUI bridge's in-memory history dies with every plugin generation
+  // (dist rebuild, restart); the record must live in the persisted state
+  // store for the card and report to keep showing it.
+  const { store, index, run } = harness()
+  const runtime = await store.ensure(SESSION)
+  for (const key of index.keys) runtime.refs.ensure(key)
+
+  const result = await run({
+    topic: "History check",
+    content: [{ startId: "m0001", endId: "m0004", summary: "done deal" }],
+  })
+
+  assert.ok(!String(result.content).startsWith("prune failed"), String(result.content))
+  assert.equal(runtime.state.stats.recentCompressions.length, 1)
+  assert.equal(runtime.state.stats.recentCompressions[0]?.topic, "History check")
+  assert.equal(runtime.state.stats.recentCompressions[0]?.blockId, 1)
 })

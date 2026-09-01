@@ -37,6 +37,8 @@ export interface DispatchMetrics {
   messagesIn: number
   tokensBefore: number
   tokensAfter: number
+  /** Context window the dispatch was measured against; absent when unknown. */
+  contextLimit?: number
 }
 
 export interface SessionTotals {
@@ -73,7 +75,8 @@ export interface TuiStatsSnapshot {
 // tui") and store key ("stats"). A mismatch means a live panel reading an
 // empty file forever.
 export const TUI_STATS_KEY = "plugin.opencode.dcp.tui.stats"
-const MAX_RECENT_COMPRESSIONS = 10
+/** Cap for the per-session compression history (persisted state and snapshots). */
+export const MAX_RECENT_COMPRESSIONS = 10
 
 /**
  * Cheap token estimate (~4 chars/token) for display-only deltas and as the
@@ -118,6 +121,14 @@ export function buildStatsSnapshot(
     model?: string
     dispatch?: DispatchMetrics
     compression?: CompressionEventRecord
+    /**
+     * Compression history owned by the persisted session state. The
+     * in-memory prior dies with every plugin generation (dist rebuild, server
+     * restart) — when provided, it takes precedence over that prior so a
+     * fresh generation cannot rewrite the file without the history the TUI
+     * companion is still displaying.
+     */
+    recentCompressions?: CompressionEventRecord[]
     totals: SessionTotals
   },
 ): TuiStatsSnapshot {
@@ -128,11 +139,15 @@ export function buildStatsSnapshot(
   }
 
   const prior = previous?.sessions[input.sessionId]
-  const recentCompressions = [...(prior?.recentCompressions ?? [])]
-  if (input.compression) {
+  const recentCompressions = input.recentCompressions
+    ? [...input.recentCompressions]
+    : [...(prior?.recentCompressions ?? [])]
+  // The caller-provided history already carries records freshly written to
+  // the state store; only append when it would otherwise go missing.
+  if (input.compression && !recentCompressions.includes(input.compression)) {
     recentCompressions.push(input.compression)
-    while (recentCompressions.length > MAX_RECENT_COMPRESSIONS) recentCompressions.shift()
   }
+  while (recentCompressions.length > MAX_RECENT_COMPRESSIONS) recentCompressions.shift()
 
   const lastDispatch =
     input.dispatch === undefined

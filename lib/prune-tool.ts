@@ -9,7 +9,7 @@ import { countTokens } from "./tokens"
 import type { TranscriptIndex } from "./transcript/scan"
 import type { TranscriptMirror } from "./transcript/mirror"
 import { deduplicate, purgeErrors } from "./strategies"
-import type { CompressionEventRecord } from "./tui-bridge"
+import { MAX_RECENT_COMPRESSIONS, type CompressionEventRecord } from "./tui-bridge"
 
 /**
  * The model-driven `prune` tool (named to avoid clashing with the platform's
@@ -174,23 +174,30 @@ export function pruneToolDefinition(deps: PruneDeps) {
         return { content: `prune failed: ${(error as Error).message}` }
       }
 
+      const record: CompressionEventRecord = {
+        at: Date.now(),
+        blockId: lastBlockId,
+        topic: args.topic,
+        ranges: plans.length,
+        messagesCovered: totalNewMessages,
+        toolsCovered,
+        tokensBefore: tokensCovered,
+        tokensAfter: tokensSummaries,
+        tokensSaved: Math.max(0, tokensCovered - tokensSummaries),
+      }
+
+      // The record rides in the persisted state (not just the TUI bridge's
+      // in-memory snapshot, which resets with every plugin generation) so the
+      // compression history survives plugin reloads and server restarts.
+      runtime.state.stats.recentCompressions.push(record)
+      while (runtime.state.stats.recentCompressions.length > MAX_RECENT_COMPRESSIONS) {
+        runtime.state.stats.recentCompressions.shift()
+      }
+
       await deps.store.persist(sessionId)
 
       try {
-        deps.recordCompression?.({
-          sessionId,
-          record: {
-            at: Date.now(),
-            blockId: lastBlockId,
-            topic: args.topic,
-            ranges: plans.length,
-            messagesCovered: totalNewMessages,
-            toolsCovered,
-            tokensBefore: tokensCovered,
-            tokensAfter: tokensSummaries,
-            tokensSaved: Math.max(0, tokensCovered - tokensSummaries),
-          },
-        })
+        deps.recordCompression?.({ sessionId, record })
       } catch {
         // Display-only bridge.
       }
@@ -202,11 +209,26 @@ export function pruneToolDefinition(deps: PruneDeps) {
         totalPrunedTokens: runtime.state.stats.totalPrunedTokens,
       })
 
+      // Occupancy AFTER this prune: `getUsageTokens` reflects the dispatch as
+      // it was sent (a warm tracker's delta predates the tool call, and a
+      // post-restart/post-revert seed was taken before the model pruned), so
+      // subtract what these compressions actually remove from the outbound
+      // transcript - newly covered original content plus consumed block
+      // summaries folded out, minus the new summaries standing in for them.
       const usageTokens = deps.getUsageTokens(sessionId)
       const limit = deps.getModelContextLimit(sessionId)
+      const consumedSummaryTokens = sumConsumedBlocks(plans, runtime, "summaryTokens")
+      const consumedOriginalTokens = sumConsumedBlocks(plans, runtime, "compressedTokens")
+      const tokensReclaimed = Math.max(
+        0,
+        Math.max(0, tokensCovered - consumedOriginalTokens) +
+          consumedSummaryTokens -
+          tokensSummaries,
+      )
+      const postPruneUsage = Math.max(0, usageTokens - tokensReclaimed)
       const usageNote =
-        usageTokens > 0 && limit !== undefined && limit > 0
-          ? ` Context usage is now approximately ${Math.round((usageTokens / limit) * 100)}% of the window.`
+        postPruneUsage > 0 && limit !== undefined && limit > 0
+          ? ` Context usage is now approximately ${Math.round((postPruneUsage / limit) * 100)}% of the window.`
           : ""
 
       return {
@@ -218,6 +240,21 @@ export function pruneToolDefinition(deps: PruneDeps) {
 }
 
 // -- argument validation -----------------------------------------------------
+
+/** Sums a per-block token field across every block consumed by the plans. */
+function sumConsumedBlocks(
+  plans: ResolvedPlan[],
+  runtime: SessionRuntime,
+  field: "summaryTokens" | "compressedTokens",
+): number {
+  let total = 0
+  for (const plan of plans) {
+    for (const id of plan.consumedBlockIds) {
+      total += Math.max(0, runtime.state.blocks[String(id)]?.[field] ?? 0)
+    }
+  }
+  return total
+}
 
 function validateArgs(input: unknown): PruneToolArgs {
   if (typeof input !== "object" || input === null) throw new Error("arguments must be an object")

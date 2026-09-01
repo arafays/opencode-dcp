@@ -111,7 +111,16 @@ export function createContextHook(deps: TransformDeps) {
       const postIndex = scanTranscript(messages)
       injectBoundaryTags(runtime.refs.byKey, messages, postIndex.keys)
 
-      await injectNudges(deps, event, postIndex.keys.length, runtime.state)
+      // Resolved once per dispatch: the nudge gate consumes it and it rides
+      // the stats snapshot so the TUI can show measured window pressure.
+      // Stays undefined when the catalog has no limit for the model - the
+      // nudge then falls back to a safety default, the TUI to raw tokens.
+      const modelContextLimit = await deps.catalogContextLimit(
+        event.model.providerID,
+        event.model.id,
+      )
+
+      await injectNudges(deps, event, postIndex.keys.length, runtime.state, modelContextLimit)
 
       publishDispatchStats(deps, {
         sessionId,
@@ -120,6 +129,7 @@ export function createContextHook(deps: TransformDeps) {
         messagesIn: messages.length,
         charsBefore,
         charsAfter: measureMessagesChars(messages),
+        contextLimit: modelContextLimit,
       })
     } catch (error) {
       // A failing hook fails the dispatch - never let DCP break a request.
@@ -151,6 +161,7 @@ function publishDispatchStats(
     messagesIn: number
     charsBefore: number
     charsAfter: number
+    contextLimit?: number
   },
 ): void {
   if (!deps.publishStats) return
@@ -168,6 +179,7 @@ function publishDispatchStats(
         messagesIn: input.messagesIn,
         tokensBefore: estimateTokens(input.charsBefore),
         tokensAfter: estimateTokens(input.charsAfter),
+        contextLimit: input.contextLimit,
       },
       totals: sessionTotals(runtime.state),
     })
@@ -181,6 +193,7 @@ async function injectNudges(
   event: SessionContextEvent,
   messageCount: number,
   state: SessionState,
+  modelContextLimit: number | undefined,
 ): Promise<void> {
   const reminders: string[] = []
 
@@ -195,15 +208,17 @@ async function injectNudges(
   // is blind - without it, a ~98%-of-window transcript dispatched right after
   // a restart/revert is never asked to prune and can overflow the window.
   const measuredTokens = estimateTokens(measureMessagesChars(event.messages))
+  // The same measurement also reseeds the tracker itself (no-op while warm),
+  // so first-dispatch consumers of `totalFor` - like the prune tool's usage
+  // note - are not blind after a restart or revert either.
+  deps.usage.seed(event.sessionID, measuredTokens)
   const usageTokens = Math.max(deps.usage.totalFor(event.sessionID), measuredTokens)
   if (usageTokens > 0) {
-    const limit =
-      (await deps.catalogContextLimit(event.model.providerID, event.model.id)) ?? 200_000
     const nudge = maybeContextNudge({
       state,
       config: deps.config,
       usageTokens,
-      modelContextLimit: limit,
+      modelContextLimit: modelContextLimit ?? 200_000,
       messageCount,
     })
     if (nudge) reminders.push(nudge)
