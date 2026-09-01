@@ -7,7 +7,7 @@ OpenCode **V2** plugin implementing Dynamic Context Pruning. Entrypoint `index.t
 ## Commands
 
 ```sh
-npm install
+aube i                                      # install from aube-lock.yaml
 npm run typecheck                          # tsc --noEmit (strict); run this first
 npm test                                   # node --import tsx --test test/*.test.ts
 node --import tsx --test test/prune.test.ts  # single test file
@@ -16,7 +16,7 @@ npm run build                              # tsup (JS) -> dist/, then native tsc
 
 - Tests use `node:test` + `tsx` (no vitest/jest). Pure unit tests: build fixtures as `WireMessage[]`; no server or network needed.
 - No lint/format config exists; typecheck + tests are the only gate.
-- `mise.toml` pins `aube` (npm-alternative package manager), but the committed lockfile is npm's and all local commands use npm.
+- `mise.toml` pins `aube` (npm-alternative package manager) and the committed lockfile is `aube-lock.yaml`. `npm run` scripts still work for typecheck/test/build. aube 2.x's frozen install fails on npm's `package-lock.json` whenever the root manifest has `peerDependencies` (npm never records root peers as importer deps, so the drift check reports "manifest adds X"), and `aube ci` deletes it in favor of its own format — so `package-lock.json` is gitignored; don't commit one.
 
 ## Gotchas
 

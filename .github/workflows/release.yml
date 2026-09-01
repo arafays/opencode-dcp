@@ -28,7 +28,9 @@ jobs:
             exit 1
           fi
 
-      # Frozen clean install; aube reads package-lock.json natively.
+      # Frozen clean install from aube-lock.yaml. (npm's package-lock.json
+      # cannot represent root peerDependencies the way aube 2.x's drift
+      # check expects, so aube ci would hard-fail on it.)
       - run: aube ci
       - run: aube run typecheck
       - run: aube test

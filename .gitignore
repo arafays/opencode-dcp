@@ -1,2 +1,7 @@
 node_modules
 dist/
+
+# npm's lockfile is incompatible with aube 2.x frozen installs when the
+# root manifest declares peerDependencies; aube-lock.yaml is the committed
+# lockfile (and `aube ci` deletes package-lock.json if it finds one).
+package-lock.json
