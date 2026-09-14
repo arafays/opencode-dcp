@@ -195,6 +195,15 @@ test("stripHallucinatedTags removes echoed boundary tags", () => {
   assert.ok(cleaned.includes("tail"))
 })
 
+test("stripHallucinatedTags removes echoed system-reminder tags", () => {
+  const input =
+    "before\n<dcp-system-reminder>\nContext at 60% of budget.\n</dcp-system-reminder>\nafter"
+  const cleaned = stripHallucinatedTags(input)
+  assert.ok(!cleaned.includes("dcp-system-reminder"))
+  assert.ok(cleaned.includes("before"))
+  assert.ok(cleaned.includes("after"))
+})
+
 test("wrapCompressedSummary produces the canonical wrapper", () => {
   const wrapped = wrapCompressedSummary(3, "body")
   assert.match(wrapped, /^\[Compressed conversation section\]\nbody\n<dcp-message-id>b3<\/dcp-message-id>$/)

@@ -4,9 +4,11 @@
     {
       "package": "../dist",
       "options": {
-        "tui": { "enabled": true },
+        "tui": {
+          "enabled": true
+        },
         "debug": true,
-        "maxContextLimit": 120000
+        "maxContextLimit": 70000
       }
     }
   ],

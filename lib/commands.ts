@@ -6,7 +6,7 @@
  * and validation inside the tool.
  */
 
-import type { CommandDraft, CommandDefinition, CommandInvocation } from "@opencode-ai/plugin/promise/command"
+import type { CommandEditor, CommandDefinition, CommandInvocation } from "@opencode-ai/plugin/promise/command"
 import type { Plugin } from "@opencode-ai/plugin"
 
 function dcpPruneTemplate(): string {
@@ -26,8 +26,8 @@ const DCP_PRUNE_DESCRIPTION = "Trigger DCP manual pruning with: /dcp-prune [focu
  * command re-prompts the session with a reminder instructing the model to call
  * the `prune` tool; the user's trailing text becomes the optional focus.
  */
-export function registerCommands(draft: CommandDraft, ctx: Plugin.Context): void {
-  draft.add({
+export function registerCommands(editor: CommandEditor, ctx: Plugin.Context): void {
+  editor.add({
     name: "dcp-prune",
     description: DCP_PRUNE_DESCRIPTION,
     execute: async (input: CommandInvocation) => {

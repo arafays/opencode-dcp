@@ -308,8 +308,8 @@ function resolvePlans(args: PruneToolArgs, index: TranscriptIndex, runtime: Sess
           block.coveredKeys.some((key) => covered.has(key)) ||
           block.coveredKeys.every((key) => !keyToIndex.has(key))
         if (!touches) continue
-        for (const key of block.coveredKeys) covered.add(key)
         consumedBlockIds.push(block.blockId)
+        for (const key of block.coveredKeys) covered.add(key)
         changed = true
       }
     }
@@ -331,16 +331,46 @@ function resolvePlans(args: PruneToolArgs, index: TranscriptIndex, runtime: Sess
     }
     claimedRanges.push({ start, end })
 
-    const nextKey = index.keys[endIndex + 1]
+    // Snap endIndex forward while the next key is a tool result (tool#N),
+    // so that call/result pairs stay atomic and the anchor is never a
+    // standalone tool message without its preceding assistant.
+    let endIndexAdjusted = endIndex
+    while (
+      endIndexAdjusted + 1 < index.keys.length &&
+      index.keys[endIndexAdjusted + 1]!.startsWith("tool#")
+    ) {
+      covered.add(index.keys[endIndexAdjusted + 1]!)
+      endIndexAdjusted++
+    }
+    const nextKey = index.keys[endIndexAdjusted + 1]
     const anchorKey = nextKey ?? TAIL_ANCHOR
-    const coveredToolIds = index.toolOrder.filter(
+
+    // Snap startIndex backward when the start message is a tool result whose
+    // preceding assistant should be included to keep pairs atomic.
+    let startIndexAdjusted = startIndex
+    while (
+      startIndexAdjusted > 0 &&
+      index.messages[startIndexAdjusted]?.role === "tool" &&
+      !covered.has(index.keys[startIndexAdjusted]!)
+    ) {
+      covered.add(index.keys[startIndexAdjusted]!)
+      startIndexAdjusted--
+    }
+
+    // Rebuild coveredKeys from the covered set (includes consumed block keys
+    // that fall outside the original message index range).
+    const finalCoveredKeys = [...covered].filter(
+      (key) => keyToIndex.has(key),
+    ).sort((left, right) => (keyToIndex.get(left) ?? 0) - (keyToIndex.get(right) ?? 0))
+
+    const finalCoveredToolIds = index.toolOrder.filter(
       (callId) => index.tools.get(callId)?.hasResult && covered.has(index.tools.get(callId)!.key),
     )
     plans.push({
       entry,
-      coveredKeys,
-      coveredToolIds,
-      coveredTokens: estimateCoveredTokens(index, coveredKeys),
+      coveredKeys: finalCoveredKeys,
+      coveredToolIds: finalCoveredToolIds,
+      coveredTokens: estimateCoveredTokens(index, finalCoveredKeys),
       anchorKey,
       consumedBlockIds,
     })

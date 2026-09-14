@@ -64,7 +64,7 @@ export function createSyntheticBlockMessage(summary: string): WireMessage {
 }
 
 const HALLUCINATED_TAG_REGEX =
-  /[ \t]*<\/?dcp-message-id(?:\s[^>]*)?>[ \t]*\n?/g
+  /[ \t]*<\/?dcp-(?:message-id|system-reminder)(?:\s[^>]*)?>[ \t]*\n?/g
 
 /** Removes DCP tags echoed by the model from its own output. */
 export function stripHallucinatedTags(text: string): string {
