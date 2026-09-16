@@ -331,13 +331,15 @@ function resolvePlans(args: PruneToolArgs, index: TranscriptIndex, runtime: Sess
     }
     claimedRanges.push({ start, end })
 
-    // Snap endIndex forward while the next key is a tool result (tool#N),
-    // so that call/result pairs stay atomic and the anchor is never a
-    // standalone tool message without its preceding assistant.
+    // Snap endIndex forward while the next message is a tool result, so that
+    // call/result pairs stay atomic and the anchor is never a standalone tool
+    // message without its preceding assistant. Keyed on role (not on the
+    // positional `tool#N` key form) so it keeps working if wire tool messages
+    // ever carry unique ids.
     let endIndexAdjusted = endIndex
     while (
-      endIndexAdjusted + 1 < index.keys.length &&
-      index.keys[endIndexAdjusted + 1]!.startsWith("tool#")
+      endIndexAdjusted + 1 < index.messages.length &&
+      index.messages[endIndexAdjusted + 1]?.role === "tool"
     ) {
       covered.add(index.keys[endIndexAdjusted + 1]!)
       endIndexAdjusted++
@@ -345,16 +347,17 @@ function resolvePlans(args: PruneToolArgs, index: TranscriptIndex, runtime: Sess
     const nextKey = index.keys[endIndexAdjusted + 1]
     const anchorKey = nextKey ?? TAIL_ANCHOR
 
-    // Snap startIndex backward when the start message is a tool result whose
-    // preceding assistant should be included to keep pairs atomic.
-    let startIndexAdjusted = startIndex
-    while (
-      startIndexAdjusted > 0 &&
-      index.messages[startIndexAdjusted]?.role === "tool" &&
-      !covered.has(index.keys[startIndexAdjusted]!)
-    ) {
-      covered.add(index.keys[startIndexAdjusted]!)
-      startIndexAdjusted--
+    // Snap startIndex backward when the range starts inside an assistant→result
+    // batch: extend coverage back over the whole consecutive tool run and the
+    // assistant that issued it, so no kept assistant is left with covered
+    // tool_calls and no kept result outlives its issuing assistant.
+    if (index.messages[startIndex]?.role === "tool") {
+      let runStart = startIndex
+      while (runStart > 0 && index.messages[runStart - 1]?.role === "tool") runStart--
+      for (let i = runStart; i < startIndex; i++) covered.add(index.keys[i]!)
+      if (index.messages[runStart - 1]?.role === "assistant") {
+        covered.add(index.keys[runStart - 1]!)
+      }
     }
 
     // Rebuild coveredKeys from the covered set (includes consumed block keys

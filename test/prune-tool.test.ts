@@ -65,10 +65,9 @@ function fixture(): WireMessage[] {
   ]
 }
 
-function harness(depsOverride: Partial<PruneDeps> = {}) {
+function harness(depsOverride: Partial<PruneDeps> = {}, messages: WireMessage[] = fixture()) {
   const store = new StateStore(undefined)
   const mirror = new TranscriptMirror()
-  const messages = fixture()
   const index = scanTranscript(messages)
   mirror.update(SESSION, index)
   const compressions: CompressionEventRecord[] = []
@@ -101,17 +100,19 @@ test("prune records a block covering the selected range", async () => {
   const state = runtime.state
   const block = state.blocks["1"]!
   assert.equal(block.active, true)
-  assert.equal(block.coveredKeys.length, 4)
+  // The range ends at assistant a2; the end-boundary snap pulls its result
+  // (t2) into the block so the call/result pair stays atomic.
+  assert.equal(block.coveredKeys.length, 5)
   assert.deepEqual(state.activeBlockIds, [1])
-  assert.equal(block.anchorKey, "id:t2")
-  assert.deepEqual(block.coveredToolIds, ["c1"])
+  assert.equal(block.anchorKey, "id:u2")
+  assert.deepEqual(block.coveredToolIds, ["c1", "c2"])
   assert.equal(state.stats.compressRuns, 1)
 
-  // TUI bridge record: one message range, one pruned tool output.
+  // TUI bridge record: one message range, two pruned tool outputs.
   assert.equal(compressions.length, 1)
   assert.equal(compressions[0]?.topic, "Auth exploration")
-  assert.equal(compressions[0]?.messagesCovered, 4)
-  assert.equal(compressions[0]?.toolsCovered, 1)
+  assert.equal(compressions[0]?.messagesCovered, 5)
+  assert.equal(compressions[0]?.toolsCovered, 2)
   assert.equal(compressions[0]?.tokensSaved, Math.max(0, compressions[0]!.tokensBefore - compressions[0]!.tokensAfter))
 })
 
@@ -135,7 +136,8 @@ test("prune consumes intersected blocks and expands their placeholders", async (
   assert.equal(first.active, false)
   assert.equal(secondBlock.active, true)
   assert.deepEqual(state.activeBlockIds, [2])
-  // Merged coverage: original range idx2..4 plus consumed block keys idx0..1.
+  // Merged coverage: original range idx2..4 plus the consumed block's keys
+  // (the first block's end-boundary snap already extended it over t2).
   assert.equal(secondBlock.coveredKeys.length, 5)
   assert.ok(secondBlock.consumedBlockIds.includes(1))
   // Placeholder was expanded with the folded block's body.
@@ -144,10 +146,11 @@ test("prune consumes intersected blocks and expands their placeholders", async (
   assert.match(secondBlock.summary, /<dcp-message-id>b2<\/dcp-message-id>/)
   assert.match(String(second.content), /b2/)
 
-  // Second record folds the consumed block: 1 net new message, both tool
-  // outputs (c1 from the folded block, c2 from the new range) counted.
+  // Second record folds the consumed block: its explicit range lies entirely
+  // inside the first block's coverage, so 0 net new messages; both tool
+  // outputs are counted.
   assert.equal(compressions.length, 2)
-  assert.equal(compressions[1]?.messagesCovered, 1)
+  assert.equal(compressions[1]?.messagesCovered, 0)
   assert.equal(compressions[1]?.toolsCovered, 2)
 })
 
@@ -269,4 +272,100 @@ test("prune persists the compression record in the session stats", async () => {
   assert.equal(runtime.state.stats.recentCompressions.length, 1)
   assert.equal(runtime.state.stats.recentCompressions[0]?.topic, "History check")
   assert.equal(runtime.state.stats.recentCompressions[0]?.blockId, 1)
+})
+
+// Wire tool results carry no ids, so their keys are positional (tool#N).
+// These fixtures exercise the call/result pair-atomicity snaps at both range
+// boundaries (arafays/opencode-dcp#2: an assistant with a covered parallel
+// tool call whose sibling result survived orphaned a role:tool message and
+// the provider rejected every later dispatch).
+function parallelFixture(): WireMessage[] {
+  return [
+    { id: "u1", role: "user", content: [{ type: "text", text: "check both" }] },
+    {
+      id: "a1",
+      role: "assistant",
+      content: [
+        { type: "tool-call", id: "c1", name: "read", input: {} },
+        { type: "tool-call", id: "c2", name: "read", input: {} },
+      ],
+    },
+    {
+      role: "tool",
+      content: [{ type: "tool-result", id: "c1", name: "read", result: { type: "text", value: "one" } }],
+    },
+    {
+      role: "tool",
+      content: [{ type: "tool-result", id: "c2", name: "read", result: { type: "text", value: "two" } }],
+    },
+    { id: "u2", role: "user", content: [{ type: "text", text: "now write" }] },
+    {
+      id: "a2",
+      role: "assistant",
+      content: [{ type: "tool-call", id: "c3", name: "edit", input: {} }],
+    },
+    {
+      role: "tool",
+      content: [{ type: "tool-result", id: "c3", name: "edit", result: { type: "text", value: "wrote" } }],
+    },
+  ]
+}
+
+test("prune snaps the end boundary forward over a parallel sibling result", async () => {
+  const { store, index, run } = harness({}, parallelFixture())
+  const runtime = await store.ensure(SESSION)
+  for (const key of index.keys) runtime.refs.ensure(key)
+
+  // Range ends at assistant a1 whose two results (tool#2, tool#3) lie outside
+  // it: without the forward snap the anchor would be a standalone tool message
+  // and its kept sibling would orphan a1's second tool_call.
+  const result = await run({
+    topic: "End boundary",
+    content: [{ startId: "m0001", endId: "m0002", summary: "s" }],
+  })
+
+  assert.ok(!String(result.content).startsWith("prune failed"), String(result.content))
+  const block = runtime.state.blocks["1"]!
+  assert.deepEqual(block.coveredKeys, ["id:u1", "id:a1", "tool#2", "tool#3"])
+  assert.equal(block.anchorKey, "id:u2")
+  assert.deepEqual(block.coveredToolIds, ["c1", "c2"])
+})
+
+test("prune snaps the start boundary back over the issuing assistant", async () => {
+  const { store, index, run } = harness({}, parallelFixture())
+  const runtime = await store.ensure(SESSION)
+  for (const key of index.keys) runtime.refs.ensure(key)
+
+  // Range starts at a tool result: the issuing assistant must be covered with
+  // it, or it would be kept with dangling tool_calls.
+  const result = await run({
+    topic: "Start boundary",
+    content: [{ startId: "m0003", endId: "m0005", summary: "s" }],
+  })
+
+  assert.ok(!String(result.content).startsWith("prune failed"), String(result.content))
+  const block = runtime.state.blocks["1"]!
+  assert.deepEqual(block.coveredKeys, ["id:a1", "tool#2", "tool#3", "id:u2"])
+  assert.equal(block.anchorKey, "id:a2")
+  assert.deepEqual(block.coveredToolIds, ["c1", "c2"])
+})
+
+test("prune snaps both boundaries when the range starts mid-batch", async () => {
+  const { store, index, run } = harness({}, parallelFixture())
+  const runtime = await store.ensure(SESSION)
+  for (const key of index.keys) runtime.refs.ensure(key)
+
+  // Range starts at the second of two parallel results and ends at an
+  // assistant whose result follows: the backward snap must absorb the whole
+  // tool run plus the issuing assistant, the forward snap the trailing result.
+  const result = await run({
+    topic: "Both boundaries",
+    content: [{ startId: "m0004", endId: "m0006", summary: "s" }],
+  })
+
+  assert.ok(!String(result.content).startsWith("prune failed"), String(result.content))
+  const block = runtime.state.blocks["1"]!
+  assert.deepEqual(block.coveredKeys, ["id:a1", "tool#2", "tool#3", "id:u2", "id:a2", "tool#6"])
+  assert.equal(block.anchorKey, "tail")
+  assert.deepEqual(block.coveredToolIds, ["c1", "c2", "c3"])
 })
