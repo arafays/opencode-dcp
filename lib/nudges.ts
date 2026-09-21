@@ -116,7 +116,9 @@ export function maybeContextNudge(input: {
 
   state.nudgeAnchors.push(messageCount)
   if (state.nudgeAnchors.length > 8) state.nudgeAnchors.shift()
-  const percent = Math.min(999, Math.round((input.usageTokens / Math.max(1, input.modelContextLimit)) * 100))
+  // Percent is of the BUDGET (which is what the rendered label names), not the
+  // full model window: the "~X% of budget (Y tokens)" reminder must agree.
+  const percent = Math.min(999, Math.round((input.usageTokens / Math.max(1, budget)) * 100))
   return CONTEXT_LIMIT_NUDGE(percent, `${budget.toLocaleString()} tokens`)
 }
 

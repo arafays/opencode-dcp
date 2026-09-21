@@ -124,6 +124,34 @@ export function applyCompressionBlocks(state: SessionState, messages: WireMessag
 }
 
 /**
+ * Rewrites legacy positional `tool#N` keys found in persisted active blocks to
+ * the keys the current scan derives (e.g. `tool:<callId>`). Older builds stored
+ * positional keys for id-less tool messages; without this rewrite, messages
+ * covered by a legacy block survive outbound (the masking check misses) and
+ * leak refs (the assignRefs skip-set misses). Transcripts are append-only
+ * between compactions/reverts, so absolute index N still addresses the same
+ * message; the role guard defends against a rare shifted prefix. Idempotent:
+ * current positional fallbacks map to themselves, and no-op runs are cheap.
+ */
+export function normalizeLegacyBlockKeys(
+  state: SessionState,
+  keys: string[],
+  messages: WireMessage[],
+): void {
+  for (const block of activeBlocks(state)) {
+    if (!block.coveredKeys.some((key) => /^tool#\d+$/.test(key))) continue
+    block.coveredKeys = block.coveredKeys.map((key) => {
+      const match = /^tool#(\d+)$/.exec(key)
+      if (!match) return key
+      const index = Number(match[1])
+      if (index < 0 || index >= keys.length) return key
+      if (messages[index]?.role !== "tool") return key
+      return keys[index]!
+    })
+  }
+}
+
+/**
  * Injects `<dcp-message-id>` boundary tags into the outbound transcript:
  * appended to user text parts and to textual tool results. Also strips DCP
  * tags the model hallucinated into its own assistant output.

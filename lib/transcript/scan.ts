@@ -3,10 +3,13 @@ import { toolResultToText, type WireMessage } from "../types"
 /**
  * Index built from the inbound transcript at each model dispatch.
  *
- * Stable keys: `message.id` when present (and unique), otherwise the positional
- * form `${role}#${index}`. Transcript prefixes are append-only between
- * compactions/reverts (which reset DCP state), so keys stay stable across
- * requests and can be persisted inside compression blocks.
+ * Stable keys: `message.id` when present (and unique), otherwise `tool:<callId>`
+ * derived from an id-less role:"tool" message's first `tool-result` part id
+ * (when unique), otherwise the positional form `${role}#${index}`. Positional
+ * keys shift after a compression, so id-less tool results prefer the callId
+ * form, which survives range removal. Transcript prefixes are append-only
+ * between compactions/reverts (which reset DCP state), so keys stay stable
+ * across requests and can be persisted inside compression blocks.
  */
 
 export interface ToolCallInfo {
@@ -120,16 +123,23 @@ export function scanTranscript(messages: WireMessage[]): TranscriptIndex {
     info.turn = users.filter((user) => user.index <= info.index).length
   }
 
-  return { messages, keys, tools, toolOrder, users, turnCount }
+  return { messages: [...messages], keys, tools, toolOrder, users, turnCount }
 }
 
 function assignKeys(messages: WireMessage[]): string[] {
   const keys = new Array<string>(messages.length)
   const seenIds = new Map<string, number>()
+  const seenToolKeys = new Map<string, number>()
   for (let index = 0; index < messages.length; index++) {
-    const id = messages[index]?.id
+    const message = messages[index]
+    if (!message) continue
+    const id = message.id
     if (typeof id === "string" && id.length > 0) {
       seenIds.set(id, (seenIds.get(id) ?? 0) + 1)
+    }
+    const toolKey = toolResultKey(message)
+    if (toolKey) {
+      seenToolKeys.set(toolKey, (seenToolKeys.get(toolKey) ?? 0) + 1)
     }
   }
   for (let index = 0; index < messages.length; index++) {
@@ -138,9 +148,32 @@ function assignKeys(messages: WireMessage[]): string[] {
     const id = message.id
     if (typeof id === "string" && id.length > 0 && seenIds.get(id) === 1) {
       keys[index] = `id:${id}`
-    } else {
-      keys[index] = `${message.role}#${index}`
+      continue
     }
+    const toolKey = toolResultKey(message)
+    if (toolKey && seenToolKeys.get(toolKey) === 1) {
+      keys[index] = toolKey
+      continue
+    }
+    keys[index] = `${message.role}#${index}`
   }
   return keys
+}
+
+/**
+ * `tool:<callId>` derived from the first `tool-result` part of an id-less
+ * role:"tool" message. Wire tool results carry no message id, so the callId is
+ * the only identity stable enough to survive compression: positional `tool#N`
+ * keys shift whenever an earlier range is removed.
+ */
+function toolResultKey(message: WireMessage | undefined): string | undefined {
+  if (!message || message.role !== "tool") return undefined
+  for (const part of message.content) {
+    if (part.type !== "tool-result") {
+      continue
+    }
+    if (typeof part.id === "string" && part.id.length > 0) return `tool:${part.id}`
+    return undefined
+  }
+  return undefined
 }

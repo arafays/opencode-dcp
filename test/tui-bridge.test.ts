@@ -1,8 +1,8 @@
-import assert from "node:assert/strict"
-import { mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs"
-import os from "node:os"
-import path from "node:path"
-import { test } from "node:test"
+import assert from "node:assert/strict";
+import { mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { test } from "node:test";
 
 import {
   buildStatsSnapshot,
@@ -12,31 +12,34 @@ import {
   writeTuiStats,
   type CompressionEventRecord,
   type TuiStatsSnapshot,
-} from "../lib/tui-bridge"
-import { sessionTotals } from "../lib/transform"
-import { createSessionState } from "../lib/state/types"
+} from "../lib/tui-bridge";
+import { sessionTotals } from "../lib/transform";
+import { createSessionState } from "../lib/state/types";
 
 function tempRoot(): string {
-  return path.join(os.tmpdir(), `dcp-tui-test-${process.pid}-${Math.random().toString(36).slice(2)}`)
+  return path.join(
+    os.tmpdir(),
+    `dcp-tui-test-${process.pid}-${Math.random().toString(36).slice(2)}`,
+  );
 }
 
 test("estimateTokens approximates chars/4", () => {
-  assert.equal(estimateTokens(0), 0)
-  assert.equal(estimateTokens(8), 2)
-  assert.equal(estimateTokens(3), 1)
-})
+  assert.equal(estimateTokens(0), 0);
+  assert.equal(estimateTokens(8), 2);
+  assert.equal(estimateTokens(3), 1);
+});
 
 test("measureMessagesChars sums text sizes across message shapes", () => {
   const messages = [
     { role: "user", content: [{ type: "text", text: "abcd" }] },
     { role: "assistant", content: [{ type: "text", text: "abcdef" }] },
-  ]
+  ];
   // "abcd"=4 + role/type keys + "abcdef"=6 plus structural strings.
-  const chars = measureMessagesChars(messages)
-  assert.ok(chars >= 10)
-  assert.equal(measureMessagesChars(undefined), 0)
-  assert.equal(measureMessagesChars([]), 0)
-})
+  const chars = measureMessagesChars(messages);
+  assert.ok(chars >= 10);
+  assert.equal(measureMessagesChars(undefined), 0);
+  assert.equal(measureMessagesChars([]), 0);
+});
 
 test("buildStatsSnapshot records dispatch deltas and keeps other sessions", () => {
   const previous = {
@@ -59,7 +62,7 @@ test("buildStatsSnapshot records dispatch deltas and keeps other sessions", () =
         recentCompressions: [],
       },
     },
-  }
+  };
 
   const snapshot = buildStatsSnapshot(previous as TuiStatsSnapshot, {
     sessionId: "s1",
@@ -75,15 +78,15 @@ test("buildStatsSnapshot records dispatch deltas and keeps other sessions", () =
       prunedTokensTotal: 0,
       messagesCompressedActive: 0,
     },
-  })
+  });
 
-  assert.ok(snapshot.sessions.other, "other session must survive the merge")
-  const entry = snapshot.sessions.s1
-  assert.ok(entry)
-  assert.equal(entry.lastDispatch?.savedTokens, 400)
-  assert.equal(entry.lastDispatch?.savedPercent, 40)
-  assert.equal(snapshot.sessions.s1?.model, "p/m")
-})
+  assert.ok(snapshot.sessions.other, "other session must survive the merge");
+  const entry = snapshot.sessions.s1;
+  assert.ok(entry);
+  assert.equal(entry.lastDispatch?.savedTokens, 400);
+  assert.equal(entry.lastDispatch?.savedPercent, 40);
+  assert.equal(snapshot.sessions.s1?.model, "p/m");
+});
 
 test("buildStatsSnapshot reports negative percent when boundary-ID overhead exceeds savings", () => {
   // Early-session dispatches can grow: injected <dcp-message-id> tags cost
@@ -102,15 +105,15 @@ test("buildStatsSnapshot reports negative percent when boundary-ID overhead exce
       prunedTokensTotal: 0,
       messagesCompressedActive: 0,
     },
-  })
-  const entry = snapshot.sessions.s1
-  assert.ok(entry?.lastDispatch)
-  assert.equal(entry.lastDispatch.savedTokens, 0)
-  assert.equal(entry.lastDispatch.savedPercent, -1)
-})
+  });
+  const entry = snapshot.sessions.s1;
+  assert.ok(entry?.lastDispatch);
+  assert.equal(entry.lastDispatch.savedTokens, 0);
+  assert.equal(entry.lastDispatch.savedPercent, -1);
+});
 
 test("buildStatsSnapshot caps recent compressions at 10", () => {
-  let snapshot: TuiStatsSnapshot | undefined
+  let snapshot: TuiStatsSnapshot | undefined;
   for (let index = 0; index < 14; index++) {
     snapshot = buildStatsSnapshot(snapshot, {
       sessionId: "s",
@@ -135,13 +138,13 @@ test("buildStatsSnapshot caps recent compressions at 10", () => {
         prunedTokensTotal: 0,
         messagesCompressedActive: 2,
       },
-    })
+    });
   }
-  const list = snapshot?.sessions.s?.recentCompressions ?? []
-  assert.equal(list.length, 10)
-  assert.equal(list.at(-1)?.topic, "t13")
-  assert.equal(list.at(-1)?.toolsCovered, 3)
-})
+  const list = snapshot?.sessions.s?.recentCompressions ?? [];
+  assert.equal(list.length, 10);
+  assert.equal(list.at(-1)?.topic, "t13");
+  assert.equal(list.at(-1)?.toolsCovered, 3);
+});
 
 test("buildStatsSnapshot prefers store-provided history over the in-memory prior", () => {
   // A plugin reload (dist rebuild, restart) resets the in-memory snapshot;
@@ -156,7 +159,7 @@ test("buildStatsSnapshot prefers store-provided history over the in-memory prior
     tokensBefore: 100,
     tokensAfter: 20,
     tokensSaved: 80,
-  }
+  };
   const fresh: CompressionEventRecord = {
     at: 2,
     blockId: 2,
@@ -166,7 +169,7 @@ test("buildStatsSnapshot prefers store-provided history over the in-memory prior
     tokensBefore: 200,
     tokensAfter: 30,
     tokensSaved: 170,
-  }
+  };
   const previous: TuiStatsSnapshot = {
     version: 1,
     generatedAt: 1,
@@ -187,7 +190,7 @@ test("buildStatsSnapshot prefers store-provided history over the in-memory prior
         recentCompressions: [stale],
       },
     },
-  }
+  };
 
   const snapshot = buildStatsSnapshot(previous, {
     sessionId: "s1",
@@ -203,12 +206,12 @@ test("buildStatsSnapshot prefers store-provided history over the in-memory prior
       prunedTokensTotal: 0,
       messagesCompressedActive: 3,
     },
-  })
+  });
 
-  const list = snapshot.sessions.s1?.recentCompressions ?? []
-  assert.equal(list.length, 1, "record already in the provided history must not duplicate")
-  assert.equal(list[0]?.topic, "fresh")
-})
+  const list = snapshot.sessions.s1?.recentCompressions ?? [];
+  assert.equal(list.length, 1, "record already in the provided history must not duplicate");
+  assert.equal(list[0]?.topic, "fresh");
+});
 
 test("buildStatsSnapshot appends a compression missing from the provided history", () => {
   const fresh: CompressionEventRecord = {
@@ -220,7 +223,7 @@ test("buildStatsSnapshot appends a compression missing from the provided history
     tokensBefore: 200,
     tokensAfter: 30,
     tokensSaved: 170,
-  }
+  };
   const snapshot = buildStatsSnapshot(undefined, {
     sessionId: "s1",
     compression: fresh,
@@ -235,14 +238,14 @@ test("buildStatsSnapshot appends a compression missing from the provided history
       prunedTokensTotal: 0,
       messagesCompressedActive: 3,
     },
-  })
-  const list = snapshot.sessions.s1?.recentCompressions ?? []
-  assert.equal(list.length, 1)
-  assert.equal(list[0]?.topic, "fresh")
-})
+  });
+  const list = snapshot.sessions.s1?.recentCompressions ?? [];
+  assert.equal(list.length, 1);
+  assert.equal(list[0]?.topic, "fresh");
+});
 
 test("sessionTotals summarizes active blocks and pruning", () => {
-  const state = createSessionState("s")
+  const state = createSessionState("s");
   state.blocks["1"] = {
     blockId: 1,
     active: true,
@@ -255,45 +258,51 @@ test("sessionTotals summarizes active blocks and pruning", () => {
     anchorKey: "tail",
     consumedBlockIds: [],
     createdAt: 0,
-  }
-  state.activeBlockIds = [1]
-  state.stats.totalPrunedTokens = 55
-  const totals = sessionTotals(state)
-  assert.equal(totals.blocksActive, 1)
-  assert.equal(totals.blockTokensCovered, 100)
-  assert.equal(totals.blockTokensSummaries, 20)
-  assert.equal(totals.messagesCompressedActive, 2)
-  assert.equal(totals.prunedTokensTotal, 55)
-})
+  };
+  state.activeBlockIds = [1];
+  state.stats.totalPrunedTokens = 55;
+  const totals = sessionTotals(state);
+  assert.equal(totals.blocksActive, 1);
+  assert.equal(totals.blockTokensCovered, 100);
+  assert.equal(totals.blockTokensSummaries, 20);
+  assert.equal(totals.messagesCompressedActive, 2);
+  assert.equal(totals.prunedTokensTotal, 55);
+});
 
 test("writeTuiStats writes into every existing channel tui dir atomically", () => {
-  const root = tempRoot()
+  const root = tempRoot();
   try {
-    mkdirSync(path.join(root, "opencode", "beta", "tui"), { recursive: true })
-    mkdirSync(path.join(root, "opencode", "local", "tui"), { recursive: true })
-    writeTuiStats({ version: 1, generatedAt: 7, sessions: {} }, root)
+    mkdirSync(path.join(root, "opencode", "beta", "tui"), { recursive: true });
+    mkdirSync(path.join(root, "opencode", "local", "tui"), { recursive: true });
+    writeTuiStats({ version: 1, generatedAt: 7, sessions: {} }, root);
     for (const channel of ["beta", "local"]) {
-      const file = path.join(root, "opencode", channel, "tui", "plugin.opencode.dcp.tui.stats.json")
-      const parsed = JSON.parse(readFileSync(file, "utf8")) as TuiStatsSnapshot
-      assert.equal(parsed.version, 1)
-      assert.equal(parsed.generatedAt, 7)
+      const file = path.join(
+        root,
+        "opencode",
+        channel,
+        "tui",
+        "plugin.opencode.dcp.tui.stats.json",
+      );
+      const parsed = JSON.parse(readFileSync(file, "utf8")) as TuiStatsSnapshot;
+      assert.equal(parsed.version, 1);
+      assert.equal(parsed.generatedAt, 7);
     }
     // No tmp leftovers.
-    const entries = readdirSync(path.join(root, "opencode", "beta", "tui"))
-    assert.equal(entries.length, 1)
+    const entries = readdirSync(path.join(root, "opencode", "beta", "tui"));
+    assert.equal(entries.length, 1);
   } finally {
-    rmSync(root, { recursive: true, force: true })
+    rmSync(root, { recursive: true, force: true });
   }
-})
+});
 
 test("resolveTuiStateDirs creates missing tui dirs and tolerates absent roots", () => {
-  const root = tempRoot()
+  const root = tempRoot();
   try {
-    mkdirSync(path.join(root, "opencode", "beta"), { recursive: true })
-    const dirs = resolveTuiStateDirs(root)
-    assert.deepEqual(dirs, [path.join(root, "opencode", "beta", "tui")])
-    assert.deepEqual(resolveTuiStateDirs(path.join(root, "does-not-exist")), [])
+    mkdirSync(path.join(root, "opencode", "beta"), { recursive: true });
+    const dirs = resolveTuiStateDirs(root);
+    assert.deepEqual(dirs, [path.join(root, "opencode", "beta", "tui")]);
+    assert.deepEqual(resolveTuiStateDirs(path.join(root, "does-not-exist")), []);
   } finally {
-    rmSync(root, { recursive: true, force: true })
+    rmSync(root, { recursive: true, force: true });
   }
-})
+});

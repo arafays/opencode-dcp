@@ -6,8 +6,12 @@
  * and validation inside the tool.
  */
 
-import type { CommandEditor, CommandDefinition, CommandInvocation } from "@opencode-ai/plugin/promise/command"
-import type { Plugin } from "@opencode-ai/plugin"
+import type {
+  CommandEditor,
+  CommandDefinition,
+  CommandInvocation,
+} from "@opencode/plugin/promise/command";
+import type { Plugin } from "@opencode/plugin";
 
 function dcpPruneTemplate(): string {
   return [
@@ -16,10 +20,10 @@ function dcpPruneTemplate(): string {
     "CLOSED section of this conversation, dropping completed work irrelevant to the current",
     'task. User focus (may be empty): "$ARGUMENTS"',
     "</dcp-system-reminder>",
-  ].join("\n")
+  ].join("\n");
 }
 
-const DCP_PRUNE_DESCRIPTION = "Trigger DCP manual pruning with: /dcp-prune [focus]"
+const DCP_PRUNE_DESCRIPTION = "Trigger DCP manual pruning with: /dcp-prune [focus]";
 
 /**
  * Registers DCP command definitions on the command draft. The `dcp-prune`
@@ -31,14 +35,16 @@ export function registerCommands(editor: CommandEditor, ctx: Plugin.Context): vo
     name: "dcp-prune",
     description: DCP_PRUNE_DESCRIPTION,
     execute: async (input: CommandInvocation) => {
-      const focus = typeof input.prompt.text === "string" ? input.prompt.text.trim() : ""
-      const text = dcpPruneTemplate().replaceAll("$ARGUMENTS", focus)
+      const focus = typeof input.prompt.text === "string" ? input.prompt.text.trim() : "";
+      // JSON.stringify escapes quotes/newlines in the focus so they cannot
+      // break out of the double-quoted "$ARGUMENTS" slot in the template.
+      const text = dcpPruneTemplate().replaceAll("$ARGUMENTS", JSON.stringify(focus));
       await ctx.session.prompt({
         ...input.prompt,
         sessionID: input.sessionID,
         text,
         delivery: input.delivery,
-      } as Parameters<typeof ctx.session.prompt>[0])
+      } as Parameters<typeof ctx.session.prompt>[0]);
     },
-  } satisfies CommandDefinition)
+  } satisfies CommandDefinition);
 }

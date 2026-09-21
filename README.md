@@ -60,11 +60,11 @@ companion loads for this local-path entry too, exactly like the `./tui` export
 does for package installs.
 
 > Requires OpenCode V2 (`opencode2`). OpenCode V2 auto-updates, so the package
-> tracks `@opencode-ai/plugin@beta` (the dist-tag resolves to the latest tagged
-> beta at install time; the committed lockfile pins the exact resolved version
-> for local dev). Don't use a caret range (`^0.0.0-beta-…`) — npm treats any
-> lexically-greater `0.0.0-*` prerelease as satisfying the range, and junk tags
-> like `windows-fix` lack the `Plugin` export.
+> tracks `@opencode/plugin` (the committed lockfile pins the exact resolved
+> version for local dev). Don't use a caret range on a prerelease
+> (`^0.0.0-beta-…`) — npm treats any lexically-greater `0.0.0-*` prerelease as
+> satisfying the range, and junk tags like `windows-fix` lack the `Plugin`
+> export.
 
 ## How it works
 

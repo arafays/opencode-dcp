@@ -2,26 +2,32 @@
   "name": "opencode-dcp",
   "version": "2.0.0-beta.10",
   "description": "Dynamic Context Pruning (DCP) plugin for OpenCode V2 - model-driven context compression, tool-output pruning, and context-window nudges",
-  "type": "module",
+  "keywords": [
+    "context-compression",
+    "context-window",
+    "dcp",
+    "dynamic-context-pruning",
+    "llm",
+    "opencode",
+    "opencode-plugin"
+  ],
+  "homepage": "https://github.com/arafays/opencode-dcp#readme",
+  "bugs": {
+    "url": "https://github.com/arafays/opencode-dcp/issues"
+  },
   "license": "MIT",
   "author": "Abdul Rafay Shaikh <me@arafays.com>",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/arafays/opencode-dcp.git"
   },
-  "bugs": {
-    "url": "https://github.com/arafays/opencode-dcp/issues"
-  },
-  "homepage": "https://github.com/arafays/opencode-dcp#readme",
-  "keywords": [
-    "opencode",
-    "opencode-plugin",
-    "dcp",
-    "dynamic-context-pruning",
-    "context-compression",
-    "context-window",
-    "llm"
+  "files": [
+    "dist",
+    "tui.tsx",
+    "README.md",
+    "LICENSE"
   ],
+  "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -31,12 +37,6 @@
     },
     "./tui": "./tui.tsx"
   },
-  "files": [
-    "dist",
-    "tui.tsx",
-    "README.md",
-    "LICENSE"
-  ],
   "scripts": {
     "build": "tsup && node scripts/copy-tui.mjs",
     "typecheck": "tsc --noEmit",
@@ -44,19 +44,20 @@
     "prepublishOnly": "npm run typecheck && npm run test && npm run build"
   },
   "dependencies": {
-    "@opencode-ai/plugin": "beta"
+    "@opencode/plugin": "latest",
+    "effect": "^3.22.2"
+  },
+  "devDependencies": {
+    "@opencode/theme": "latest",
+    "@types/node": "24.12.2",
+    "tsup": "8.5.1",
+    "tsx": "4.23.12",
+    "typescript": "5.8.2"
   },
   "peerDependencies": {
     "@opentui/core": ">=0.5.8",
     "@opentui/solid": ">=0.5.8",
     "solid-js": ">=1.9.0"
-  },
-  "devDependencies": {
-    "@opencode-ai/theme": "beta",
-    "@types/node": "25.9.5",
-    "tsup": "8.5.1",
-    "tsx": "4.23.12",
-    "typescript": "5.9.3"
   },
   "engines": {
     "node": ">=22"

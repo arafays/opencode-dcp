@@ -1,62 +1,73 @@
-import assert from "node:assert/strict"
-import { test } from "node:test"
+import assert from "node:assert/strict";
+import { test } from "node:test";
 
-import { resolveOptions } from "../lib/config"
-import { purgeErrors } from "../lib/strategies"
+import { resolveOptions } from "../lib/config";
+import { purgeErrors } from "../lib/strategies";
 import {
   applyCompressionBlocks,
   injectBoundaryTags,
+  normalizeLegacyBlockKeys,
   pruneToolOutputs,
-} from "../lib/prune"
-import { applyCompression, wrapCompressedSummary } from "../lib/state/store"
-import { createSessionState, type SessionState } from "../lib/state/types"
-import { scanTranscript } from "../lib/transcript/scan"
-import { stripHallucinatedTags } from "../lib/transcript/edit"
-import type { ToolResultPart, WireMessage } from "../lib/types"
+} from "../lib/prune";
+import { applyCompression, wrapCompressedSummary } from "../lib/state/store";
+import { RefRegistry } from "../lib/refs";
+import { createSessionState, type SessionState } from "../lib/state/types";
+import { scanTranscript } from "../lib/transcript/scan";
+import { stripHallucinatedTags } from "../lib/transcript/edit";
+import type { ToolResultPart, WireMessage } from "../lib/types";
 
-const CONFIG = resolveOptions(undefined, () => {})
+const CONFIG = resolveOptions(undefined, () => {});
 
-const PRUNED_PLACEHOLDER = "[Output removed to save context - information superseded or no longer needed]"
+const PRUNED_PLACEHOLDER =
+  "[Output removed to save context - information superseded or no longer needed]";
 
-function toolMessage(id: string, callId: string, name: string, result: ToolResultPart["result"]): WireMessage {
-  return { id, role: "tool", content: [{ type: "tool-result", id: callId, name, result }] }
+function toolMessage(
+  id: string,
+  callId: string,
+  name: string,
+  result: ToolResultPart["result"],
+): WireMessage {
+  return { id, role: "tool", content: [{ type: "tool-result", id: callId, name, result }] };
 }
 
 test("pruneToolOutputs replaces pruned outputs with a placeholder", () => {
-  const state = createSessionState("s")
-  state.prunedTools = { c1: 120 }
+  const state = createSessionState("s");
+  state.prunedTools = { c1: 120 };
   const messages: WireMessage[] = [
     toolMessage("t1", "c1", "read", { type: "json", value: { big: "payload" } }),
     toolMessage("t2", "c2", "grep", { type: "text", value: "keep me" }),
-  ]
-  pruneToolOutputs(state, messages, CONFIG)
-  assert.deepEqual((messages[0]!.content[0] as ToolResultPart).result, { type: "text", value: PRUNED_PLACEHOLDER })
+  ];
+  pruneToolOutputs(state, messages, CONFIG);
+  assert.deepEqual((messages[0]!.content[0] as ToolResultPart).result, {
+    type: "text",
+    value: PRUNED_PLACEHOLDER,
+  });
   // Untouched call stays intact.
-  assert.equal((messages[1]!.content[0] as ToolResultPart).result.type, "text")
-})
+  assert.equal((messages[1]!.content[0] as ToolResultPart).result.type, "text");
+});
 
 test("pruneToolOutputs never touches protected tools", () => {
-  const state = createSessionState("s")
-  state.prunedTools = { q1: 50 }
+  const state = createSessionState("s");
+  state.prunedTools = { q1: 50 };
   const messages: WireMessage[] = [
     toolMessage("t1", "q1", "question", { type: "json", value: { answers: ["yes"] } }),
-  ]
-  pruneToolOutputs(state, messages, CONFIG)
-  assert.equal((messages[0]!.content[0] as ToolResultPart).result.type, "json")
+  ];
+  pruneToolOutputs(state, messages, CONFIG);
+  assert.equal((messages[0]!.content[0] as ToolResultPart).result.type, "json");
 
-  const globbed = resolveOptions({ protectedTools: ["mcp*"] }, () => {})
-  const state2 = createSessionState("s2")
-  state2.prunedTools = { m1: 30 }
+  const globbed = resolveOptions({ protectedTools: ["mcp*"] }, () => {});
+  const state2 = createSessionState("s2");
+  state2.prunedTools = { m1: 30 };
   const messages2: WireMessage[] = [
     toolMessage("t1", "m1", "mcpSearch", { type: "json", value: { ok: true } }),
-  ]
-  pruneToolOutputs(state2, messages2, globbed)
-  assert.equal((messages2[0]!.content[0] as ToolResultPart).result.type, "json")
-})
+  ];
+  pruneToolOutputs(state2, messages2, globbed);
+  assert.equal((messages2[0]!.content[0] as ToolResultPart).result.type, "json");
+});
 
 test("pruneToolOutputs blanks inputs of pruned errored calls", () => {
-  const state = createSessionState("s")
-  state.prunedTools = { c9: 10 }
+  const state = createSessionState("s");
+  state.prunedTools = { c9: 10 };
   const messages: WireMessage[] = [
     {
       id: "a9",
@@ -64,27 +75,33 @@ test("pruneToolOutputs blanks inputs of pruned errored calls", () => {
       content: [{ type: "tool-call", id: "c9", name: "bash", input: { command: "rm -rf /" } }],
     },
     toolMessage("t9", "c9", "bash", { type: "error", value: { message: "boom" } }),
-  ]
-  pruneToolOutputs(state, messages, CONFIG)
-  const assistant = messages[0]!
+  ];
+  pruneToolOutputs(state, messages, CONFIG);
+  const assistant = messages[0]!;
   assert.equal(
     (assistant.content[0] as { input: Record<string, unknown> }).input.command,
     "[input removed due to failed tool call]",
-  )
-  assert.equal((messages[1]!.content[0] as ToolResultPart).result.type, "text")
-})
+  );
+  assert.equal((messages[1]!.content[0] as ToolResultPart).result.type, "text");
+});
 
 function buildCompressedState(): { state: SessionState; keys: string[]; messages: WireMessage[] } {
   const messages: WireMessage[] = [
     { id: "u1", role: "user", content: [{ type: "text", text: "explore" }] },
     { id: "a1", role: "assistant", content: [{ type: "text", text: "found things" }] },
-    { id: "t1", role: "tool", content: [{ type: "tool-result", id: "c1", name: "read", result: { type: "text", value: "data" } }] },
-  ]
-  const index = scanTranscript(messages)
-  const state = createSessionState("s")
+    {
+      id: "t1",
+      role: "tool",
+      content: [
+        { type: "tool-result", id: "c1", name: "read", result: { type: "text", value: "data" } },
+      ],
+    },
+  ];
+  const index = scanTranscript(messages);
+  const state = createSessionState("s");
   const block = applyCompression({
     state,
-    refs: { ensure: (key: string) => key, keyOf: () => undefined } as never,
+    refs: new RefRegistry(),
     topic: "exploration",
     summary: "summary text",
     coveredKeys: [index.keys[0]!, index.keys[1]!],
@@ -92,39 +109,113 @@ function buildCompressedState(): { state: SessionState; keys: string[]; messages
     coveredTokens: 500,
     consumedBlockIds: [],
     anchorKey: index.keys[2]!,
-  })
-  void block
-  return { state, keys: index.keys, messages }
+  });
+  void block;
+  return { state, keys: index.keys, messages };
 }
 
 test("applyCompressionBlocks swaps covered ranges for an anchored summary", () => {
-  const { state, keys, messages } = buildCompressedState()
-  applyCompressionBlocks(state, messages, keys)
-  assert.equal(messages.length, 2)
-  const synthetic = messages[0]!
-  assert.equal(synthetic.role, "user")
-  const text =
-    synthetic.content[0]?.type === "text" ? synthetic.content[0].text : ""
-  assert.match(text, /\[Compressed conversation section\]/)
-  assert.match(text, /summary text/)
-  assert.match(text, /<dcp-message-id>b1<\/dcp-message-id>/)
+  const { state, keys, messages } = buildCompressedState();
+  applyCompressionBlocks(state, messages, keys);
+  assert.equal(messages.length, 2);
+  const synthetic = messages[0]!;
+  assert.equal(synthetic.role, "user");
+  const text = synthetic.content[0]?.type === "text" ? synthetic.content[0].text : "";
+  assert.match(text, /\[Compressed conversation section\]/);
+  assert.match(text, /summary text/);
+  assert.match(text, /<dcp-message-id>b1<\/dcp-message-id>/);
   // The anchor message survives.
-  assert.equal(messages[1]!.id, "t1")
-})
+  assert.equal(messages[1]!.id, "t1");
+});
+
+test("normalizeLegacyBlockKeys rewrites legacy tool#N coverage to current scan keys", () => {
+  const messages: WireMessage[] = [
+    { id: "u1", role: "user", content: [{ type: "text", text: "explore" }] },
+    { id: "a1", role: "assistant", content: [{ type: "text", text: "asked" }] },
+    {
+      role: "tool",
+      content: [
+        { type: "tool-result", id: "c9", name: "read", result: { type: "text", value: "data" } },
+      ],
+    },
+  ];
+  const index = scanTranscript(messages);
+  // Simulate a session persisted by an older build: the id-less tool message at
+  // position 2 was covered by the legacy positional key.
+  const state = createSessionState("s");
+  state.blocks["1"] = {
+    blockId: 1,
+    active: true,
+    topic: "legacy",
+    summary: "summary text",
+    summaryTokens: 10,
+    compressedTokens: 100,
+    coveredKeys: ["tool#2"],
+    coveredToolIds: [],
+    anchorKey: "tail",
+    consumedBlockIds: [],
+    createdAt: 1,
+  };
+  state.activeBlockIds = [1];
+
+  const currentKey = index.keys[2]!;
+  assert.match(currentKey, /^tool:c9$/);
+  normalizeLegacyBlockKeys(state, index.keys, index.messages);
+  assert.deepEqual(state.blocks["1"]!.coveredKeys, [currentKey]);
+
+  // Idempotent.
+  normalizeLegacyBlockKeys(state, index.keys, index.messages);
+  assert.deepEqual(state.blocks["1"]!.coveredKeys, [currentKey]);
+
+  // The covered message is now actually masked outbound.
+  const outbound = [...messages];
+  applyCompressionBlocks(state, outbound, index.keys);
+  assert.equal(outbound.length, 3); // u1, a1, tail-anchored summary
+  assert.ok(outbound.every((message) => message.role !== "tool"));
+});
+
+test("normalizeLegacyBlockKeys leaves legacy keys alone when the index no longer addresses a tool message", () => {
+  const messages: WireMessage[] = [
+    { id: "u1", role: "user", content: [{ type: "text", text: "explore" }] },
+    { id: "a1", role: "assistant", content: [{ type: "text", text: "asked" }] },
+  ];
+  const index = scanTranscript(messages);
+  const state = createSessionState("s");
+  state.blocks["1"] = {
+    blockId: 1,
+    active: true,
+    topic: "legacy",
+    summary: "summary text",
+    summaryTokens: 10,
+    compressedTokens: 100,
+    coveredKeys: ["tool#1"], // index 1 is now an assistant message
+    coveredToolIds: [],
+    anchorKey: "tail",
+    consumedBlockIds: [],
+    createdAt: 1,
+  };
+  state.activeBlockIds = [1];
+  normalizeLegacyBlockKeys(state, index.keys, index.messages);
+  assert.deepEqual(state.blocks["1"]!.coveredKeys, ["tool#1"]);
+  // Out-of-range legacy indexes are likewise untouched.
+  state.blocks["1"]!.coveredKeys = ["tool#9"];
+  normalizeLegacyBlockKeys(state, index.keys, index.messages);
+  assert.deepEqual(state.blocks["1"]!.coveredKeys, ["tool#9"]);
+});
 
 test("applyCompressionBlocks appends tail-anchored summaries at the end", () => {
-  const { state, keys } = buildCompressedState()
-  state.blocks["1"]!.anchorKey = "tail"
+  const { state, keys } = buildCompressedState();
+  state.blocks["1"]!.anchorKey = "tail";
   const messages: WireMessage[] = [
     { id: "u1", role: "user", content: [{ type: "text", text: "explore" }] },
     { id: "a1", role: "assistant", content: [] },
     { id: "t1", role: "tool", content: [] },
-  ]
-  applyCompressionBlocks(state, messages, keys)
-  assert.equal(messages.length, 2)
-  assert.equal(messages[0]!.id, "t1")
-  assert.equal(messages[1]!.role, "user")
-})
+  ];
+  applyCompressionBlocks(state, messages, keys);
+  assert.equal(messages.length, 2);
+  assert.equal(messages[0]!.id, "t1");
+  assert.equal(messages[1]!.role, "user");
+});
 
 test("injectBoundaryTags tags user texts and textual tool results only", () => {
   const messages: WireMessage[] = [
@@ -142,19 +233,26 @@ test("injectBoundaryTags tags user texts and textual tool results only", () => {
         { type: "tool-result", id: "c2", name: "read", result: { type: "json", value: { x: 1 } } },
       ],
     },
-  ]
-  const index = scanTranscript(messages)
-  injectBoundaryTags(new Map([["id:u1", "m0001"], ["id:t1", "m0003"]]), messages, index.keys)
+  ];
+  const index = scanTranscript(messages);
+  injectBoundaryTags(
+    new Map([
+      ["id:u1", "m0001"],
+      ["id:t1", "m0003"],
+    ]),
+    messages,
+    index.keys,
+  );
 
-  const userText = (messages[0]!.content[0]! as { text: string }).text
-  assert.match(userText, /^hello\n<dcp-message-id>m0001<\/dcp-message-id>$/)
+  const userText = (messages[0]!.content[0]! as { text: string }).text;
+  assert.match(userText, /^hello\n<dcp-message-id>m0001<\/dcp-message-id>$/);
   // Hallucinated tag in assistant output is stripped.
-  assert.ok(!((messages[1]!.content[0]! as { text: string }).text.includes("dcp-message-id")))
-  const results = messages[2]!.content as ToolResultPart[]
-  assert.match(results[0]!.result.value as string, /<dcp-message-id>m0003<\/dcp-message-id>$/)
+  assert.ok(!(messages[1]!.content[0]! as { text: string }).text.includes("dcp-message-id"));
+  const results = messages[2]!.content as ToolResultPart[];
+  assert.match(results[0]!.result.value as string, /<dcp-message-id>m0003<\/dcp-message-id>$/);
   // JSON results are left untouched.
-  assert.deepEqual(results[1]!.result.value, { x: 1 })
-})
+  assert.deepEqual(results[1]!.result.value, { x: 1 });
+});
 
 test("purgeErrors eats stale errored protected-tool calls but keeps successes", () => {
   const messages: WireMessage[] = [
@@ -171,8 +269,18 @@ test("purgeErrors eats stale errored protected-tool calls but keeps successes", 
       id: "t1",
       role: "tool",
       content: [
-        { type: "tool-result", id: "e1", name: "edit", result: { type: "error", value: { message: "not found" } } },
-        { type: "tool-result", id: "s1", name: "edit", result: { type: "text", value: "wrote file" } },
+        {
+          type: "tool-result",
+          id: "e1",
+          name: "edit",
+          result: { type: "error", value: { message: "not found" } },
+        },
+        {
+          type: "tool-result",
+          id: "s1",
+          name: "edit",
+          result: { type: "text", value: "wrote file" },
+        },
       ],
     },
     ...Array.from({ length: 6 }, (_, i): WireMessage => ({
@@ -180,31 +288,34 @@ test("purgeErrors eats stale errored protected-tool calls but keeps successes", 
       role: "user",
       content: [{ type: "text", text: `turn ${i + 2}` }],
     })),
-  ]
-  const index = scanTranscript(messages)
-  assert.ok(index.turnCount > 4)
-  const state = createSessionState("s")
-  const result = purgeErrors(state, index, CONFIG)
-  assert.deepEqual(result.added, ["e1"])
-})
+  ];
+  const index = scanTranscript(messages);
+  assert.ok(index.turnCount > 4);
+  const state = createSessionState("s");
+  const result = purgeErrors(state, index, CONFIG);
+  assert.deepEqual(result.added, ["e1"]);
+});
 
 test("stripHallucinatedTags removes echoed boundary tags", () => {
-  const cleaned = stripHallucinatedTags("para\n<dcp-message-id>m0042</dcp-message-id>\ntail")
-  assert.ok(!cleaned.includes("dcp-message-id"))
-  assert.ok(cleaned.includes("para"))
-  assert.ok(cleaned.includes("tail"))
-})
+  const cleaned = stripHallucinatedTags("para\n<dcp-message-id>m0042</dcp-message-id>\ntail");
+  assert.ok(!cleaned.includes("dcp-message-id"));
+  assert.ok(cleaned.includes("para"));
+  assert.ok(cleaned.includes("tail"));
+});
 
 test("stripHallucinatedTags removes echoed system-reminder tags", () => {
   const input =
-    "before\n<dcp-system-reminder>\nContext at 60% of budget.\n</dcp-system-reminder>\nafter"
-  const cleaned = stripHallucinatedTags(input)
-  assert.ok(!cleaned.includes("dcp-system-reminder"))
-  assert.ok(cleaned.includes("before"))
-  assert.ok(cleaned.includes("after"))
-})
+    "before\n<dcp-system-reminder>\nContext at 60% of budget.\n</dcp-system-reminder>\nafter";
+  const cleaned = stripHallucinatedTags(input);
+  assert.ok(!cleaned.includes("dcp-system-reminder"));
+  assert.ok(cleaned.includes("before"));
+  assert.ok(cleaned.includes("after"));
+});
 
 test("wrapCompressedSummary produces the canonical wrapper", () => {
-  const wrapped = wrapCompressedSummary(3, "body")
-  assert.match(wrapped, /^\[Compressed conversation section\]\nbody\n<dcp-message-id>b3<\/dcp-message-id>$/)
-})
+  const wrapped = wrapCompressedSummary(3, "body");
+  assert.match(
+    wrapped,
+    /^\[Compressed conversation section\]\nbody\n<dcp-message-id>b3<\/dcp-message-id>$/,
+  );
+});

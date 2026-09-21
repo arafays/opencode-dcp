@@ -1,6 +1,6 @@
-import { mkdirSync, readdirSync, renameSync, writeFileSync } from "node:fs"
-import os from "node:os"
-import path from "node:path"
+import { mkdirSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 /**
  * Bridge between the server-side plugin and its TUI companion (`tui.tsx`).
@@ -18,109 +18,109 @@ import path from "node:path"
  */
 
 export interface CompressionEventRecord {
-  at: number
-  blockId: number
-  topic: string
-  ranges: number
-  messagesCovered: number
+  at: number;
+  blockId: number;
+  topic: string;
+  ranges: number;
+  messagesCovered: number;
   /** Tool outputs swallowed by this compression (absent in older snapshots). */
-  toolsCovered?: number
-  tokensBefore: number
-  tokensAfter: number
-  tokensSaved: number
+  toolsCovered?: number;
+  tokensBefore: number;
+  tokensAfter: number;
+  tokensSaved: number;
 }
 
 export interface DispatchMetrics {
-  at: number
-  agent?: string
-  model?: string
-  messagesIn: number
-  tokensBefore: number
-  tokensAfter: number
+  at: number;
+  agent?: string;
+  model?: string;
+  messagesIn: number;
+  tokensBefore: number;
+  tokensAfter: number;
   /** Context window the dispatch was measured against; absent when unknown. */
-  contextLimit?: number
+  contextLimit?: number;
 }
 
 export interface SessionTotals {
-  dispatches: number
-  compressRuns: number
-  blocksActive: number
-  blocksTotal: number
+  dispatches: number;
+  compressRuns: number;
+  blocksActive: number;
+  blocksTotal: number;
   /** Estimated tokens of original content replaced by active block summaries. */
-  blockTokensCovered: number
+  blockTokensCovered: number;
   /** Estimated tokens spent on the active summaries themselves. */
-  blockTokensSummaries: number
+  blockTokensSummaries: number;
   /** Estimated tokens reclaimed by tool-output pruning (cumulative). */
-  prunedTokensTotal: number
-  messagesCompressedActive: number
+  prunedTokensTotal: number;
+  messagesCompressedActive: number;
 }
 
 export interface SessionStatsSnapshot {
-  sessionId: string
-  updatedAt: number
-  model?: string
-  lastDispatch?: DispatchMetrics & { savedTokens: number; savedPercent: number }
-  totals: SessionTotals
-  recentCompressions: CompressionEventRecord[]
+  sessionId: string;
+  updatedAt: number;
+  model?: string;
+  lastDispatch?: DispatchMetrics & { savedTokens: number; savedPercent: number };
+  totals: SessionTotals;
+  recentCompressions: CompressionEventRecord[];
 }
 
 export interface TuiStatsSnapshot {
-  version: 1
-  generatedAt: number
-  sessions: Record<string, SessionStatsSnapshot>
+  version: 1;
+  generatedAt: number;
+  sessions: Record<string, SessionStatsSnapshot>;
 }
 
 // Must match the file the TUI companion watches: its plugin context derives
 // storage keys as `plugin.<id>.<key>` from its definition id ("opencode.dcp.
 // tui") and store key ("stats"). A mismatch means a live panel reading an
 // empty file forever.
-export const TUI_STATS_KEY = "plugin.opencode.dcp.tui.stats"
+export const TUI_STATS_KEY = "plugin.opencode.dcp.tui.stats";
 /** Cap for the per-session compression history (persisted state and snapshots). */
-export const MAX_RECENT_COMPRESSIONS = 10
+export const MAX_RECENT_COMPRESSIONS = 10;
 
 /**
  * Cheap token estimate (~4 chars/token) for display-only deltas and as the
  * always-available floor of the context-nudge gate (see `injectNudges`).
  */
 export function estimateTokens(chars: number): number {
-  return Math.max(0, Math.round(chars / 4))
+  return Math.max(0, Math.round(chars / 4));
 }
 
 /** Sums the text size of wire messages without copying them. */
 export function measureMessagesChars(messages: unknown): number {
-  if (!Array.isArray(messages)) return 0
-  let total = 0
+  if (!Array.isArray(messages)) return 0;
+  let total = 0;
   for (const message of messages) {
-    if (typeof message !== "object" || message === null) continue
-    const record = message as Record<string, unknown>
-    total += measurePartChars(record)
+    if (typeof message !== "object" || message === null) continue;
+    const record = message as Record<string, unknown>;
+    total += measurePartChars(record);
   }
-  return total
+  return total;
 }
 
 function measurePartChars(value: unknown): number {
-  if (typeof value === "string") return value.length
-  if (typeof value !== "object" || value === null) return 0
+  if (typeof value === "string") return value.length;
+  if (typeof value !== "object" || value === null) return 0;
   if (Array.isArray(value)) {
-    let total = 0
-    for (const item of value) total += measurePartChars(item)
-    return total
+    let total = 0;
+    for (const item of value) total += measurePartChars(item);
+    return total;
   }
-  let total = 0
+  let total = 0;
   for (const item of Object.values(value as Record<string, unknown>)) {
-    total += measurePartChars(item)
+    total += measurePartChars(item);
   }
-  return total
+  return total;
 }
 
 /** Builds the next snapshot by merging one dispatch/compression update. */
 export function buildStatsSnapshot(
   previous: TuiStatsSnapshot | undefined,
   input: {
-    sessionId: string
-    model?: string
-    dispatch?: DispatchMetrics
-    compression?: CompressionEventRecord
+    sessionId: string;
+    model?: string;
+    dispatch?: DispatchMetrics;
+    compression?: CompressionEventRecord;
     /**
      * Compression history owned by the persisted session state. The
      * in-memory prior dies with every plugin generation (dist rebuild, server
@@ -128,26 +128,26 @@ export function buildStatsSnapshot(
      * fresh generation cannot rewrite the file without the history the TUI
      * companion is still displaying.
      */
-    recentCompressions?: CompressionEventRecord[]
-    totals: SessionTotals
+    recentCompressions?: CompressionEventRecord[];
+    totals: SessionTotals;
   },
 ): TuiStatsSnapshot {
-  const sessions: Record<string, SessionStatsSnapshot> = {}
+  const sessions: Record<string, SessionStatsSnapshot> = {};
   for (const [id, entry] of Object.entries(previous?.sessions ?? {})) {
-    if (id === input.sessionId) continue
-    sessions[id] = entry
+    if (id === input.sessionId) continue;
+    sessions[id] = entry;
   }
 
-  const prior = previous?.sessions[input.sessionId]
+  const prior = previous?.sessions[input.sessionId];
   const recentCompressions = input.recentCompressions
     ? [...input.recentCompressions]
-    : [...(prior?.recentCompressions ?? [])]
+    : [...(prior?.recentCompressions ?? [])];
   // The caller-provided history already carries records freshly written to
   // the state store; only append when it would otherwise go missing.
   if (input.compression && !recentCompressions.includes(input.compression)) {
-    recentCompressions.push(input.compression)
+    recentCompressions.push(input.compression);
   }
-  while (recentCompressions.length > MAX_RECENT_COMPRESSIONS) recentCompressions.shift()
+  while (recentCompressions.length > MAX_RECENT_COMPRESSIONS) recentCompressions.shift();
 
   const lastDispatch =
     input.dispatch === undefined
@@ -163,7 +163,7 @@ export function buildStatsSnapshot(
                     100,
                 )
               : 0,
-        }
+        };
 
   sessions[input.sessionId] = {
     sessionId: input.sessionId,
@@ -172,9 +172,9 @@ export function buildStatsSnapshot(
     lastDispatch,
     totals: input.totals,
     recentCompressions,
-  }
+  };
 
-  return { version: 1, generatedAt: Date.now(), sessions }
+  return { version: 1, generatedAt: Date.now(), sessions };
 }
 
 /**
@@ -182,38 +182,39 @@ export function buildStatsSnapshot(
  * defaults to the XDG state home; overridable for tests.
  */
 export function resolveTuiStateDirs(stateRoot?: string): string[] {
-  const root = stateRoot ?? process.env.XDG_STATE_HOME ?? path.join(os.homedir(), ".local", "state")
-  const appDir = path.join(root, "opencode")
-  let channels: string[]
+  const root =
+    stateRoot ?? process.env.XDG_STATE_HOME ?? path.join(os.homedir(), ".local", "state");
+  const appDir = path.join(root, "opencode");
+  let channels: string[];
   try {
     channels = readdirSync(appDir, { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
-      .map((entry) => entry.name)
+      .map((entry) => entry.name);
   } catch {
-    return []
+    return [];
   }
-  const targets: string[] = []
+  const targets: string[] = [];
   for (const channel of channels) {
-    const tuiDir = path.join(appDir, channel, "tui")
+    const tuiDir = path.join(appDir, channel, "tui");
     try {
-      mkdirSync(tuiDir, { recursive: true })
-      targets.push(tuiDir)
+      mkdirSync(tuiDir, { recursive: true });
+      targets.push(tuiDir);
     } catch {
       // Unwritable channel dir: skip.
     }
   }
-  return targets
+  return targets;
 }
 
 /** Writes the snapshot atomically to every TUI storage directory. Never throws. */
 export function writeTuiStats(snapshot: TuiStatsSnapshot, stateRoot?: string): void {
-  const payload = JSON.stringify(snapshot)
+  const payload = JSON.stringify(snapshot);
   for (const dir of resolveTuiStateDirs(stateRoot)) {
-    const finalPath = path.join(dir, `${TUI_STATS_KEY}.json`)
-    const tmpPath = `${finalPath}.tmp-${process.pid}`
+    const finalPath = path.join(dir, `${TUI_STATS_KEY}.json`);
+    const tmpPath = `${finalPath}.tmp-${process.pid}`;
     try {
-      writeFileSync(tmpPath, payload, "utf8")
-      renameSync(tmpPath, finalPath)
+      writeFileSync(tmpPath, payload, "utf8");
+      renameSync(tmpPath, finalPath);
     } catch {
       // Display-only bridge: a failed write is silently ignored.
     }

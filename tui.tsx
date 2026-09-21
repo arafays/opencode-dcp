@@ -1,6 +1,6 @@
 /** @jsxImportSource @opentui/solid */
 
-import { Plugin } from "@opencode-ai/plugin/tui"
+import { Plugin } from "@opencode/plugin/tui"
 import { createEffect, createSignal, For, onCleanup, Show } from "solid-js"
 
 /**
@@ -118,7 +118,7 @@ export default Plugin.define({
     // Semantic theme tokens: green when pruning paid off, amber while the
     // boundary-ID overhead of a fresh block is not yet paid back.
     const savingsColor = (percent: number) =>
-      percent >= 0 ? ctx.theme.text.feedback.success.default : ctx.theme.text.subdued
+      percent >= 0 ? ctx.theme.text.feedback.success.base : ctx.theme.text.muted
 
     // Measured outbound pressure of the last dispatch: the pre-DCP transcript
     // size against the model's context window (percent unknown when the
@@ -135,24 +135,29 @@ export default Plugin.define({
 
     const pressureColor = (percent: number | undefined) =>
       percent === undefined
-        ? ctx.theme.text.subdued
+        ? ctx.theme.text.muted
         : percent >= 85
-          ? ctx.theme.text.feedback.error.default
+          ? ctx.theme.text.feedback.error.base
           : percent >= 60
-            ? ctx.theme.text.feedback.warning.default
-            : ctx.theme.text.subdued
+            ? ctx.theme.text.feedback.warning.base
+            : ctx.theme.text.muted
 
     const pressureLabel = (pressure: { tokens: number; percent?: number }) =>
       pressure.percent !== undefined
         ? `${String(pressure.percent)}% of window`
         : `${fmtTokens(pressure.tokens)} tok`
 
-    // Compact always-on line in the prompt footer status area. While blocks
-    // are active it reports last-dispatch savings; with none it must not
-    // pretend pruning is in progress (issue #1: a "DCP −0% · -955 pruned"
-    // footer next to a ~98%-of-window request read as if something were
-    // being pruned) - it shows a distinct idle state carrying the measured
-    // window pressure instead.
+    // Compact always-on line in the prompt footer status area. The default
+    // footer already surfaces context usage ("39.6K (20%)" · cost · shortcuts),
+    // so this stays strictly about DCP. Two rules:
+    //   - never pretend pruning is in progress (issue #1: a "DCP −0% · -955
+    //     pruned" footer next to a ~98%-of-window request read as if something
+    //     were being pruned) -> idle shows a bare "idle", no pressure figure
+    //     (the default footer carries usage);
+    //   - never show a bare percent (issue #2: "−61%" reads as "61% of what?")
+    //     -> the active state names the metric: the last dispatch's OUTBOUND
+    //     transcript reduction. Per-dispatch absolute tokens are redundant
+    //     with that percent; cumulative totals live on the summary card.
     const disposeFooter = ctx.ui.slot({
       append: "prompt.footer.status",
       render: (input) => {
@@ -162,23 +167,16 @@ export default Plugin.define({
           <Show when={dispatch()}>
             {(dispatch: () => NonNullable<SessionStatsSnapshot["lastDispatch"]>) => (
               <text>
-                <span style={{ fg: ctx.theme.text.default }}>DCP </span>
+                <span style={{ fg: ctx.theme.text.base }}> DCP </span>
                 <Show
                   when={(entry()?.totals.blocksActive ?? 0) > 0}
-                  fallback={
-                    <span style={{ fg: pressureColor(dispatchPressure(dispatch()).percent) }}>
-                      idle · {pressureLabel(dispatchPressure(dispatch()))}
-                    </span>
-                  }
+                  fallback={<span style={{ fg: ctx.theme.text.muted }}>idle</span>}
                 >
                   <span style={{ fg: savingsColor(dispatch().savedPercent) }}>
                     {dispatch().savedPercent >= 0 ? "−" : "+"}
                     {Math.abs(dispatch().savedPercent)}%
                   </span>
-                  <span style={{ fg: ctx.theme.text.subdued }}>
-                    {" "}
-                    · {fmtTokens(dispatch().tokensBefore - dispatch().tokensAfter)} pruned
-                  </span>
+                  <span style={{ fg: ctx.theme.text.muted }}> outbound</span>
                 </Show>
               </text>
             )}
@@ -284,10 +282,10 @@ export default Plugin.define({
 
       const severity = (percent: number) =>
         percent >= 85
-          ? ctx.theme.text.feedback.error.default
+          ? ctx.theme.text.feedback.error.base
           : percent >= 60
-            ? ctx.theme.text.feedback.warning.default
-            : ctx.theme.text.feedback.success.default
+            ? ctx.theme.text.feedback.warning.base
+            : ctx.theme.text.feedback.success.base
 
       const contextLabel = (value: { tokens: number; limit?: number; percent?: number }) => {
         const head = value.percent !== undefined ? ` ${String(value.percent)}%` : ` ${fmtTokens(value.tokens)}`
@@ -312,7 +310,7 @@ export default Plugin.define({
               <box
                 border
                 borderStyle="rounded"
-                borderColor={ctx.theme.border.default}
+                borderColor={ctx.theme.border.base}
                 marginTop={1}
                 marginLeft={3}
                 marginRight={2}
@@ -321,9 +319,9 @@ export default Plugin.define({
                 flexDirection="column"
               >
                 <text>
-                  <span style={{ fg: ctx.theme.text.feedback.success.default }}>▪ DCP</span>
-                  <span style={{ fg: ctx.theme.text.subdued }}> │ </span>
-                  <span style={{ fg: ctx.theme.text.default }}>
+                  <span style={{ fg: ctx.theme.text.feedback.success.base }}>▪ DCP</span>
+                  <span style={{ fg: ctx.theme.text.muted }}> │ </span>
+                  <span style={{ fg: ctx.theme.text.base }}>
                     ~{fmtTokens(totalSaved())} tokens saved total
                   </span>
                 </text>
@@ -333,41 +331,41 @@ export default Plugin.define({
                       <span style={{ fg: severity(value().percent ?? 0) }}>
                         {contextBar(value().percent ?? 0, CONTEXT_BAR_WIDTH)}
                       </span>
-                      <span style={{ fg: ctx.theme.text.subdued }}>{contextLabel(value())}</span>
+                      <span style={{ fg: ctx.theme.text.muted }}>{contextLabel(value())}</span>
                     </text>
                   )}
                 </Show>
                 <text>
-                  <span style={{ fg: ctx.theme.text.subdued }}>▪ </span>
-                  <span style={{ fg: ctx.theme.text.default }}>
+                  <span style={{ fg: ctx.theme.text.muted }}>▪ </span>
+                  <span style={{ fg: ctx.theme.text.base }}>
                     Compression #{String(record().blockId)}:{" "}
                   </span>
-                  <span style={{ fg: ctx.theme.text.feedback.success.default }}>
+                  <span style={{ fg: ctx.theme.text.feedback.success.base }}>
                     {fmtTokens(record().tokensBefore)} → {fmtTokens(record().tokensAfter)}
                   </span>
-                  <span style={{ fg: ctx.theme.text.subdued }}> tok in the pruned section (</span>
-                  <span style={{ fg: ctx.theme.text.feedback.success.default }}>
+                  <span style={{ fg: ctx.theme.text.muted }}> tok in the pruned section (</span>
+                  <span style={{ fg: ctx.theme.text.feedback.success.base }}>
                     −{fmtTokens(record().tokensSaved)}
                   </span>
-                  <span style={{ fg: ctx.theme.text.subdued }}>
+                  <span style={{ fg: ctx.theme.text.muted }}>
                     {" "}
                     · {String(sectionPercent())}% of the section)
                   </span>
                 </text>
                 <text>
-                  <span style={{ fg: ctx.theme.text.subdued }}>→ Topic: </span>
-                  <span style={{ fg: ctx.theme.text.default }}>{record().topic}</span>
+                  <span style={{ fg: ctx.theme.text.muted }}>→ Topic: </span>
+                  <span style={{ fg: ctx.theme.text.base }}>{record().topic}</span>
                 </text>
                 <text>
-                  <span style={{ fg: ctx.theme.text.subdued }}>→ Items: </span>
-                  <span style={{ fg: ctx.theme.text.default }}>
+                  <span style={{ fg: ctx.theme.text.muted }}>→ Items: </span>
+                  <span style={{ fg: ctx.theme.text.base }}>
                     {String(record().messagesCovered)} message{record().messagesCovered === 1 ? "" : "s"}
                     {record().toolsCovered === undefined
                       ? " compressed"
                       : ` and ${String(record().toolsCovered)} tool${record().toolsCovered === 1 ? "" : "s"} compressed`}
                   </span>
                 </text>
-                <text fg={ctx.theme.text.subdued}>
+                <text fg={ctx.theme.text.muted}>
                   {fmtTime(record().at)} · {fmtDate(record().at)}
                 </text>
               </box>
@@ -415,12 +413,12 @@ export default Plugin.define({
                     padding={1}
                     width="70%"
                     height="60%"
-                    backgroundColor={ctx.theme.background.default}
+                    backgroundColor={ctx.theme.background.base}
                   >
                     <Show
                       when={snapshot()}
                       fallback={
-                        <text fg={ctx.theme.text.subdued}>No DCP activity recorded for this session yet.</text>
+                        <text fg={ctx.theme.text.muted}>No DCP activity recorded for this session yet.</text>
                       }
                     >
                       {(snapshot: () => SessionStatsSnapshot) => (
@@ -465,7 +463,7 @@ export default Plugin.define({
                                     ? ""
                                     : ` · ${String(record.toolsCovered)} tool${record.toolsCovered === 1 ? "" : "s"}`}{" "}
                                   ·{" "}
-                                  <span style={{ fg: ctx.theme.text.feedback.success.default }}>
+                                  <span style={{ fg: ctx.theme.text.feedback.success.base }}>
                                     −{fmtTokens(record.tokensSaved)} tok
                                   </span>
                                 </text>

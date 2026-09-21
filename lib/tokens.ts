@@ -4,5 +4,5 @@
  * come from provider usage events.
  */
 export function countTokens(text: string): number {
-  return text ? Math.round(text.length / 4) : 0
+  return text ? Math.round(text.length / 4) : 0;
 }

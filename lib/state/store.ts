@@ -135,6 +135,18 @@ export function applyCompression(input: {
     // Covered keys of consumed blocks stay covered through the new block.
   }
 
+  // Ref slots for every newly-covered key are freed: the new block's own
+  // coverage plus everything the consumed blocks covered (their coverage just
+  // folded into this block). Persisted block.coveredKeys arrays stay intact.
+  const releasedKeys = [
+    ...input.coveredKeys,
+    ...input.consumedBlockIds.flatMap((id) => {
+      const consumed = state.blocks[String(id)]
+      return consumed ? consumed.coveredKeys : []
+    }),
+  ]
+  input.refs.release(releasedKeys)
+
   // Keys already covered by consumed blocks are re-covered by this block only;
   // keys must not be double-counted in active coverage.
   for (const id of state.activeBlockIds) {
