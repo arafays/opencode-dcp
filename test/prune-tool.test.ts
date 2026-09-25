@@ -7,6 +7,7 @@ import { createLogger } from "../lib/logger";
 import { StateStore } from "../lib/state/store";
 import { TranscriptMirror } from "../lib/transcript/mirror";
 import { scanTranscript } from "../lib/transcript/scan";
+import { countTokens } from "../lib/tokens";
 import type { CompressionEventRecord } from "../lib/tui-bridge";
 import type { WireMessage } from "../lib/types";
 
@@ -144,12 +145,16 @@ test("prune consumes intersected blocks and expands their placeholders", async (
     topic: "First pass",
     content: [{ startId: "m0001", endId: "m0004", summary: "summary text" }],
   });
-  // The first compression releases the refs of its covered keys, so the second
-  // pass re-addresses the pruned content by its block ID (b1), exactly as the
-  // model sees it in the post-compression transcript.
+  // The first compression releases the refs of its covered keys (m0001..m0005:
+  // u1, a1, tool:c1, a2 and the end-snap over t2), so the second pass
+  // re-addresses the pruned content by its block ID and reaches PAST it to the
+  // first uncovered message - u2 holds m0006, the ref after the block's five
+  // covered keys - exactly as the model sees it in the post-compression
+  // transcript. The range must add a message outside the consumed section or
+  // the zero-gain guard rejects it.
   const second = await run({
     topic: "Second pass",
-    content: [{ startId: "b1", endId: "b1", summary: "Folded: (b1) plus more detail." }],
+    content: [{ startId: "b1", endId: "m0006", summary: "Folded: (b1) plus more detail." }],
   });
 
   const state = runtime.state;
@@ -158,22 +163,23 @@ test("prune consumes intersected blocks and expands their placeholders", async (
   assert.equal(first.active, false);
   assert.equal(secondBlock.active, true);
   assert.deepEqual(state.activeBlockIds, [2]);
-  // Merged coverage: the re-pruned b1 range plus the consumed block's own
-  // keys, which the first block's end-boundary snap had already extended over
-  // t2.
-  assert.equal(secondBlock.coveredKeys.length, 5);
+  // Merged coverage: the consumed block's 5 keys (its end-boundary snap had
+  // already extended over t2) plus the newly covered u2.
+  assert.equal(secondBlock.coveredKeys.length, 6);
+  assert.ok(secondBlock.coveredKeys.includes("id:u2"));
   assert.ok(secondBlock.consumedBlockIds.includes(1));
+  assert.equal(secondBlock.anchorKey, "id:a3");
   // Placeholder was expanded with the folded block's body.
   assert.match(secondBlock.summary, /summary text/);
   assert.match(secondBlock.summary, /plus more detail/);
   assert.match(secondBlock.summary, /<dcp-message-id>b2<\/dcp-message-id>/);
   assert.match(String(second.content), /b2/);
 
-  // Second record folds the consumed block: its explicit range lies entirely
-  // inside the first block's coverage, so 0 net new messages; both tool
-  // outputs are counted.
+  // Second record folds the consumed block: 6 covered keys minus the 5 the
+  // consumed block already held = 1 net new message; both tool outputs ride
+  // the merged coverage.
   assert.equal(compressions.length, 2);
-  assert.equal(compressions[1]?.messagesCovered, 0);
+  assert.equal(compressions[1]?.messagesCovered, 1);
   assert.equal(compressions[1]?.toolsCovered, 2);
 });
 
@@ -184,9 +190,14 @@ test("prune drops a consumed block whose placeholder is omitted", async () => {
 
   await run({
     topic: "First pass",
-    content: [{ startId: "m0001", endId: "m0004", summary: "stale completed work details" }],
+    // ~230 chars: the standing summary alone is ~75 tokens, so dropping it
+    // reclaims more than the zero-gain floor max(32, 1/4 of it) - a drop IS a
+    // real gain even though the range covers no new messages.
+    content: [
+      { startId: "m0001", endId: "m0004", summary: "stale completed work details ".repeat(8) },
+    ],
   });
-  await run({
+  const second = await run({
     topic: "Second pass",
     // The b1 range re-prunes the stale block (refs of its covered keys were
     // released by the first compression). No (b1) placeholder: the stale
@@ -194,45 +205,134 @@ test("prune drops a consumed block whose placeholder is omitted", async () => {
     content: [{ startId: "b1", endId: "b1", summary: "only what matters now" }],
   });
 
+  assert.ok(
+    !String(second.content).startsWith("context error: "),
+    String(second.content),
+  );
   const secondBlock = runtime.state.blocks["2"]!;
   assert.equal(secondBlock.active, true);
   assert.ok(secondBlock.consumedBlockIds.includes(1));
   assert.ok(!secondBlock.summary.includes("stale completed work details"));
 });
 
-test("prune rejects explicitly overlapping ranges and unknown ids", async () => {
+test("prune rejects a zero-gain re-prune without touching state", async () => {
+  const { store, index, run, compressions } = harness();
+  const runtime = await store.ensure(SESSION);
+  for (const key of index.keys) runtime.refs.ensure(key);
+
+  await run({
+    topic: "First pass",
+    content: [{ startId: "m0001", endId: "m0004", summary: "summary text" }],
+  });
+  const state = runtime.state;
+  const before = {
+    blocks: Object.keys(state.blocks).length,
+    nextBlockId: state.nextBlockId,
+    compressRuns: state.stats.compressRuns,
+    recent: state.stats.recentCompressions.length,
+    activeBlockIds: [...state.activeBlockIds],
+    pruneSeq: state.pruneSeq,
+  };
+  // applyCompression clears the rate-limit anchors on success - surviving one
+  // proves the rejected call never reached it.
+  state.nudgeAnchors = [7];
+
+  // b1..b1 covers exactly the consumed block (newMessages = 0), and a
+  // same-size rephrasing reclaims less than max(32, 1/4 of the standing
+  // summary): the whole call must be rejected BEFORE any state mutation.
+  const second = await run({
+    topic: "Same size",
+    content: [{ startId: "b1", endId: "b1", summary: "Restated: summary text, again." }],
+  });
+
+  assert.match(String(second.content), /^context error: /);
+  assert.match(String(second.content), /b1\.\.b1 \(already compressed as b1\)/);
+  assert.match(String(second.content), /no messages outside active compressed sections/);
+  assert.match(String(second.content), /would free too few tokens/);
+
+  // No state mutation: no new block, no run, no record, anchors untouched.
+  assert.equal(Object.keys(state.blocks).length, before.blocks);
+  assert.equal(state.nextBlockId, before.nextBlockId);
+  assert.equal(state.stats.compressRuns, before.compressRuns);
+  assert.equal(state.stats.recentCompressions.length, before.recent);
+  assert.deepEqual(state.activeBlockIds, before.activeBlockIds);
+  assert.equal(state.pruneSeq, before.pruneSeq);
+  assert.deepEqual(state.nudgeAnchors, [7]);
+  assert.equal(compressions.length, 1);
+});
+
+test("prune records an honest re-summarize when the fold clears the floor", async () => {
+  const { store, index, run, compressions } = harness();
+  const runtime = await store.ensure(SESSION);
+  for (const key of index.keys) runtime.refs.ensure(key);
+
+  // ~610 chars -> ~170 wrapped summary tokens, so swapping it for a ~30-char
+  // one-liner reclaims far more than max(32, 1/4 of it): the guard lets this
+  // zero-new-message pass through.
+  const longSummary = "dense original findings and decisions ".repeat(18);
+  await run({
+    topic: "First pass",
+    content: [{ startId: "m0001", endId: "m0004", summary: longSummary }],
+  });
+  const first = runtime.state.blocks["1"]!;
+
+  const second = await run({
+    topic: "Tighten",
+    // No (b1) placeholder: the standing summary is replaced by a one-liner.
+    content: [{ startId: "b1", endId: "b1", summary: "tight re-summary of b1 content" }],
+  });
+
+  assert.match(String(second.content), /^Re-summarized already-compressed content/);
+  assert.match(String(second.content), /do not repeat this pass/);
+
+  const record = compressions[1]!;
+  assert.equal(compressions.length, 2);
+  assert.equal(record.messagesCovered, 0);
+  // "before" is the summary being replaced - NOT the original coverage, whose
+  // tokens left the outbound transcript with the first compression.
+  assert.equal(record.tokensBefore, countTokens(first.summary));
+  assert.equal(record.tokensAfter, countTokens(runtime.state.blocks["2"]!.summary));
+  assert.equal(record.tokensSaved, Math.max(0, record.tokensBefore - record.tokensAfter));
+  assert.ok(record.tokensSaved > 0);
+  assert.ok(record.tokensBefore < compressions[0]!.tokensBefore);
+});
+
+test("prune reports overlapping ranges and unknown ids as scoped errors", async () => {
   const { store, index, run } = harness();
   const runtime = await store.ensure(SESSION);
   for (const key of index.keys) runtime.refs.ensure(key);
 
-  // Expected failures throw rather than returning success content; the runner
-  // frames them as real tool failures ("prune failed: …").
-  await assert.rejects(
-    run({
-      topic: "Overlap",
-      content: [
-        { startId: "m0001", endId: "m0002", summary: "one" },
-        { startId: "m0002", endId: "m0003", summary: "two" },
-      ],
-    }),
-    /ranges overlap/,
-  );
+  // Expected failures are RETURNED as `context error: …` content rather than
+  // rejected: a rejected promise-plugin tool becomes an Effect defect, which
+  // core's classifyToolExits turns into a squash that fails the model's other
+  // unsettled tool calls in the same step. A returned error stays scoped to
+  // this call, so the model can retry with corrected ids.
+  const overlap = await run({
+    topic: "Overlap",
+    content: [
+      { startId: "m0001", endId: "m0002", summary: "one" },
+      { startId: "m0002", endId: "m0003", summary: "two" },
+    ],
+  });
+  assert.match(String(overlap.content), /^context error: /);
+  assert.match(String(overlap.content), /ranges overlap/);
 
-  await assert.rejects(
-    run({
-      topic: "Missing",
-      content: [{ startId: "m9999", endId: "m0003", summary: "nope" }],
-    }),
-    /does not exist in the current context/,
-  );
+  const missing = await run({
+    topic: "Missing",
+    content: [{ startId: "m9999", endId: "m0003", summary: "nope" }],
+  });
+  assert.match(String(missing.content), /^context error: /);
+  assert.match(String(missing.content), /does not exist in the current context/);
+
+  // Nothing was persisted by either failed call.
+  assert.equal(runtime.state.stats.compressRuns, 0);
 });
 
-test("prune rejects malformed arguments and empty context", async () => {
+test("prune reports malformed arguments and empty context as scoped errors", async () => {
   const { run } = harness();
-  await assert.rejects(
-    run({ topic: "", content: [] }),
-    /content must be a non-empty array of ranges/,
-  );
+  const malformed = await run({ topic: "", content: [] });
+  assert.match(String(malformed.content), /^context error: /);
+  assert.match(String(malformed.content), /content must be a non-empty array of ranges/);
 
   const emptyStore = new StateStore(undefined);
   const emptyTool = pruneToolDefinition({
@@ -243,13 +343,12 @@ test("prune rejects malformed arguments and empty context", async () => {
     getModelContextLimit: () => undefined,
     getUsageTokens: () => 0,
   });
-  await assert.rejects(
-    emptyTool.execute(
-      { topic: "x", content: [{ startId: "m0001", endId: "m0002", summary: "s" }] },
-      { sessionID: "ses_other" },
-    ),
-    /no conversation context is available/,
+  const empty = await emptyTool.execute(
+    { topic: "x", content: [{ startId: "m0001", endId: "m0002", summary: "s" }] },
+    { sessionID: "ses_other" },
   );
+  assert.match(String(empty.content), /^context error: /);
+  assert.match(String(empty.content), /no conversation context is available/);
 });
 
 test("prune clears pending nudge anchors on success", async () => {
@@ -285,8 +384,16 @@ test("prune reports post-prune occupancy in its usage note", async () => {
   const reclaimed = Math.max(0, record.tokensBefore - record.tokensAfter);
   const expected = Math.round(((150_000 - reclaimed) / 200_000) * 100);
   assert.ok(!String(result.content).startsWith("prune failed"), String(result.content));
-  assert.match(String(result.content), new RegExp(`approximately ${expected}% of the window`));
+  // Both denominators named, exactly as the pressure reminder names them.
+  assert.match(String(result.content), new RegExp(`${expected}% of the 200,000-token model window`));
   assert.ok(expected < 75, "note must drop below the pre-prune 75% occupancy");
+  // Still above the 140,000 budget at this occupancy, so the note says so
+  // rather than implying the pass was enough - and it points at content
+  // OUTSIDE the active compressed sections (re-pruning those is a no-op).
+  assert.match(
+    String(result.content),
+    /Still above the pruning budget - prune again only if another meaningfully sized closed section exists outside the active compressed sections/,
+  );
 });
 
 test("prune persists the compression record in the session stats", async () => {

@@ -1,8 +1,14 @@
-import type { DcpOptions } from "./config";
+import { resolveLimit, type DcpOptions } from "./config";
+import {
+  FALLBACK_CONTEXT_WINDOW,
+  percentOf,
+  tokenLabel,
+  windowClause,
+} from "./constants";
 import type { Logger } from "./logger";
 import { PRUNE_RANGE } from "./prompts";
 import { formatBlockRef, parseBlockRef, parseMessageRef } from "./refs";
-import { applyCompression, activeBlocks, TAIL_ANCHOR } from "./state/store";
+import { applyCompression, activeBlocks, wrapCompressedSummary, TAIL_ANCHOR } from "./state/store";
 import { normalizeLegacyBlockKeys } from "./prune";
 import type { SessionRuntime, StateStore } from "./state/store";
 import type { CompressionBlock, SessionState } from "./state/types";
@@ -82,6 +88,13 @@ export interface PruneDeps {
   config: DcpOptions;
   getModelContextLimit: (sessionId: string) => number | undefined;
   getUsageTokens: (sessionId: string) => number;
+  /**
+   * Marks the usage estimate as predating this prune. The next dispatch then
+   * trusts its own transcript measurement instead of maxing the pre-prune
+   * provider delta back in (which re-nudged the model with the number it just
+   * acted on). Optional so embedders without a tracker keep working.
+   */
+  markPruned?(sessionId: string): void;
   /** Publishes a completed compression to the TUI stats bridge (optional). */
   recordCompression?(input: { sessionId: string; record: CompressionEventRecord }): void;
 }
@@ -116,9 +129,17 @@ export function pruneToolDefinition(deps: PruneDeps) {
     // action stays stable regardless of the platform default.
     options: { codemode: false, permission: "prune" },
     execute: async (input: unknown, context: PruneToolContext) => {
-      // Expected failures are THROWN, never returned as model-visible success
-      // content: the runner frames a thrown error as a real tool failure
-      // ("prune failed: …"), so defects propagate instead of being laundered.
+      // Failures are RETURNED as model-visible error content, never thrown.
+      // Core runs a promise plugin tool through `Effect.promise`, so a
+      // rejection is raised as an Effect *defect*, not a typed `Tool.Error`:
+      // `tool/runtime.ts` only `mapError`s the typed channel and `tool.ts`
+      // only `catchTag("Tool.Error")`, so a rejected prune call reaches
+      // `classifyToolExits` as a die reason and
+      // `failUnsettledTools(Cause.squash(...))` fails the model's OTHER
+      // unsettled tool calls in the same step with our error. Returning keeps
+      // the failure scoped to this call, which is what `context error: …`
+      // already does for argument validation.
+      try {
       const args = validateArgs(input);
       const sessionId = context.sessionID;
 
@@ -139,8 +160,8 @@ export function pruneToolDefinition(deps: PruneDeps) {
       deduplicate(runtime.state, index, deps.config);
       purgeErrors(runtime.state, index, deps.config);
 
-      // Defects here (unknown IDs, overlapping ranges, invalid boundaries)
-      // surface as tool failures rather than success content.
+      // Recoverable here (unknown IDs, overlapping ranges, invalid boundaries);
+      // the catch below reports them as `context error: …` for this call only.
       const plans = resolvePlans(args, index, runtime);
 
       await context.progress?.({ title: `DCP: pruning "${args.topic}"` });
@@ -153,15 +174,61 @@ export function pruneToolDefinition(deps: PruneDeps) {
       const blockLabels: string[] = [];
 
       // Expand every summary up front: a bad `(bN)` reference in a model-written
-      // summary (expandPlaceholders) is a recoverable tool failure, so it must
-      // abort the whole call BEFORE the first block is recorded - multi-range
-      // prunes should be atomic, not partially applied. Genuine internal defects
-      // also propagate; both surface as real tool failures ("prune failed: …"),
-      // never as model-visible success content. Interruption handling is left
+      // summary (expandPlaceholders) must abort the whole call BEFORE the first
+      // block is recorded - multi-range prunes should be atomic, not partially
+      // applied. The catch below turns that abort into `context error: …` so the
+      // model can retry with a corrected summary. Interruption handling is left
       // entirely to the platform.
       const expandedSummaries = plans.map((plan) =>
         expandPlaceholders(plan.entry.summary, runtime.state),
       );
+
+      // Zero-gain re-prune guard. A range whose coverage is exactly the blocks
+      // it consumes re-summarizes content that is ALREADY out of the outbound
+      // transcript (the consumed block's standing summary replaced those
+      // originals long ago), so the only tokens such a pass can free are the
+      // delta between the old and the new summary - historically ~0 (196 -> 179
+      // token swaps), while the record claimed the full original coverage as
+      // "saved" and the usage note kept saying "still above - prune again",
+      // driving the model to re-prune the same region every few seconds.
+      // Reject BEFORE any state mutation. A fold that meaningfully shrinks the
+      // standing summary (>= max(32, 1/4 of it), i.e. a real tightening or an
+      // outright drop) still passes, as does any range covering new messages.
+      const zeroGainRanges: string[] = [];
+      for (let planIndex = 0; planIndex < plans.length; planIndex++) {
+        const plan = plans[planIndex]!;
+        let consumedCoverage = 0;
+        let consumedSummaryTokens = 0;
+        let consumedOriginalTokens = 0;
+        for (const id of plan.consumedBlockIds) {
+          const consumed = runtime.state.blocks[String(id)];
+          consumedCoverage += consumed?.coveredKeys.length ?? 0;
+          consumedSummaryTokens += Math.max(0, consumed?.summaryTokens ?? 0);
+          consumedOriginalTokens += Math.max(0, consumed?.compressedTokens ?? 0);
+        }
+        if (Math.max(0, plan.coveredKeys.length - consumedCoverage) > 0) continue;
+        // Preview of the summaryTokens applyCompression would record for this
+        // plan (wrapper included; the provisional block id only varies in a
+        // character or two of the wrapper, but match the allocator anyway).
+        const newSummaryTokens = countTokens(
+          wrapCompressedSummary(runtime.state.nextBlockId + planIndex, expandedSummaries[planIndex]!),
+        );
+        const freshOriginalTokens = Math.max(0, plan.coveredTokens - consumedOriginalTokens);
+        const reclaim = freshOriginalTokens + consumedSummaryTokens - newSummaryTokens;
+        const floor = Math.max(32, Math.floor(consumedSummaryTokens / 4));
+        if (reclaim < floor) {
+          const blocks = plan.consumedBlockIds.map((id) => formatBlockRef(id)).join(", ");
+          zeroGainRanges.push(
+            `${plan.entry.startId}..${plan.entry.endId}${blocks ? ` (already compressed as ${blocks})` : ""}`,
+          );
+        }
+      }
+      if (zeroGainRanges.length > 0) {
+        throw new Error(
+          `these ranges add no messages outside active compressed sections and would free too few tokens: ${zeroGainRanges.join("; ")}. Prune messages not yet inside a compressed section, or fold/drop a block only when the replacement summary is substantially shorter.`,
+        );
+      }
+
       for (let planIndex = 0; planIndex < plans.length; planIndex++) {
         const plan = plans[planIndex]!;
         const block = applyCompression({
@@ -187,6 +254,19 @@ export function pruneToolDefinition(deps: PruneDeps) {
         blockLabels.push(formatBlockRef(block.blockId));
       }
 
+      // Honest outbound accounting, computed while the sums are exact: tokens
+      // whose original text is inside a consumed block are NOT in the
+      // transcript anymore (the block's standing summary is), so "before" is
+      // the still-fresh original content plus the summaries being replaced -
+      // never the full covered-original estimate. The old before/after pair
+      // made a zero-gain re-prune report the entire original coverage as
+      // saved for swapping a ~196-token summary for a ~179-token one.
+      const consumedSummaryTokens = sumConsumedBlocks(plans, runtime, "summaryTokens");
+      const consumedOriginalTokens = sumConsumedBlocks(plans, runtime, "compressedTokens");
+      const tokensBefore =
+        Math.max(0, tokensCovered - consumedOriginalTokens) + consumedSummaryTokens;
+      const tokensSaved = Math.max(0, tokensBefore - tokensSummaries);
+
       const record: CompressionEventRecord = {
         at: Date.now(),
         blockId: lastBlockId,
@@ -194,9 +274,9 @@ export function pruneToolDefinition(deps: PruneDeps) {
         ranges: plans.length,
         messagesCovered: totalNewMessages,
         toolsCovered,
-        tokensBefore: tokensCovered,
+        tokensBefore,
         tokensAfter: tokensSummaries,
-        tokensSaved: Math.max(0, tokensCovered - tokensSummaries),
+        tokensSaved,
       };
 
       // The record rides in the persisted state (not just the TUI bridge's
@@ -206,6 +286,16 @@ export function pruneToolDefinition(deps: PruneDeps) {
       while (runtime.state.stats.recentCompressions.length > MAX_RECENT_COMPRESSIONS) {
         runtime.state.stats.recentCompressions.shift();
       }
+
+      // Capture occupancy BEFORE `markPruned`: the tracker zeroes its estimate
+      // and drops the baseline on a prune (the on-hand delta describes the
+      // pre-prune prompt), so reading it afterwards would report 0.
+      const usageTokens = deps.getUsageTokens(sessionId);
+
+      // Any occupancy recorded before this point describes the pre-prune
+      // prompt; flag it so the next dispatch measures fresh instead of
+      // re-nudging with the number the model just acted on.
+      deps.markPruned?.(sessionId);
 
       await deps.store.persist(sessionId);
 
@@ -222,32 +312,43 @@ export function pruneToolDefinition(deps: PruneDeps) {
         totalPrunedTokens: runtime.state.stats.totalPrunedTokens,
       });
 
-      // Occupancy AFTER this prune: `getUsageTokens` reflects the dispatch as
-      // it was sent (a warm tracker's delta predates the tool call, and a
-      // post-restart/post-revert seed was taken before the model pruned), so
-      // subtract what these compressions actually remove from the outbound
-      // transcript - newly covered original content plus consumed block
-      // summaries folded out, minus the new summaries standing in for them.
-      const usageTokens = deps.getUsageTokens(sessionId);
-      const limit = deps.getModelContextLimit(sessionId);
-      const consumedSummaryTokens = sumConsumedBlocks(plans, runtime, "summaryTokens");
-      const consumedOriginalTokens = sumConsumedBlocks(plans, runtime, "compressedTokens");
-      const tokensReclaimed = Math.max(
-        0,
-        Math.max(0, tokensCovered - consumedOriginalTokens) +
-          consumedSummaryTokens -
-          tokensSummaries,
-      );
-      const postPruneUsage = Math.max(0, usageTokens - tokensReclaimed);
+      // The window always resolves (unlisted model -> default), so the note
+      // names BOTH denominators exactly like the pressure reminder does: a
+      // percentage of only one of them is what reads as stale or contradictory.
+      const window = deps.getModelContextLimit(sessionId) ?? FALLBACK_CONTEXT_WINDOW;
+      const budget = resolveLimit(deps.config.maxContextLimit, window);
+      // `tokensSaved` is the honest outbound delta computed above: exactly the
+      // fresh originals plus consumed summaries this pass removed, minus the
+      // new summaries standing in for them.
+      const postPruneUsage = Math.max(0, usageTokens - tokensSaved);
       const usageNote =
-        postPruneUsage > 0 && limit !== undefined && limit > 0
-          ? ` Context usage is now approximately ${Math.round((postPruneUsage / limit) * 100)}% of the window.`
+        postPruneUsage > 0 && budget > 0
+          ? ` Context is now ~${tokenLabel(postPruneUsage)} tokens: ${percentOf(postPruneUsage, budget)}% of the ${tokenLabel(budget)}-token pruning budget${windowClause(postPruneUsage, budget, window)}. ${
+              postPruneUsage < budget
+                ? "Under the pruning budget - no further pruning needed now."
+                : "Still above the pruning budget - prune again only if another meaningfully sized closed section exists outside the active compressed sections."
+            }`
           : "";
 
+      const outcome =
+        totalNewMessages > 0
+          ? `Pruned ${totalNewMessages} message(s) into ${blockLabels.length} pruned section(s) (${blockLabels.join(", ")}).`
+          : `Re-summarized already-compressed content into ${blockLabels.length} pruned section(s) (${blockLabels.join(", ")}), freeing ~${tokenLabel(tokensSaved)} tokens of standing summary. No new messages were covered - do not repeat this pass.`;
       return {
-        content: `Pruned ${totalNewMessages} message(s) into ${blockLabels.length} pruned section(s) (${blockLabels.join(", ")}).${usageNote}`,
+        content: `${outcome}${usageNote}`,
         metadata: { topic: args.topic, blocks: blockLabels },
       };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        deps.logger.debug("prune tool failed", {
+          sessionID: context.sessionID,
+          error: message,
+        });
+        return {
+          content: `context error: ${message}`,
+          metadata: { error: true },
+        };
+      }
     },
   };
 }

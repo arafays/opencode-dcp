@@ -1,10 +1,11 @@
-import type { DcpOptions } from "./config"
-import { resolveLimit } from "./config"
-import { CONTEXT_LIMIT_NUDGE, ITERATION_NUDGE } from "./prompts"
+import type { DcpOptions } from "./config";
+import { NUDGE_ANCHOR_CAP } from "./constants"
+import { resolveLimit } from "./config";
+import { CONTEXT_LIMIT_NUDGE, ITERATION_NUDGE, POST_PRUNE_ACK } from "./prompts"
 
 /**
- * Context-pressure nudges. Context occupancy is estimated two ways, and the
- * larger of the two arms the reminder (see `injectNudges` in transform.ts):
+ * Context-pressure reminders. Context occupancy is estimated two ways, and
+ * the larger of the two arms the reminder (see `injectNudges` in transform.ts):
  * provider usage events (`session.usage.updated`, tracked per session by the
  * event pump) and the per-dispatch transcript measurement taken in the
  * context hook - the measurement is the floor that keeps the gate armed when
@@ -14,9 +15,19 @@ import { CONTEXT_LIMIT_NUDGE, ITERATION_NUDGE } from "./prompts"
  * estimate crosses the configured budget, a reminder is appended to the
  * outbound transcript asking the model to run `prune`.
  *
- * Rate limiting: at most one active nudge per
+ * Staleness: a provider delta recorded BEFORE the newest prune describes the
+ * pre-prune prompt. `UsageTracker.markPruned` zeroes that estimate and drops
+ * the baseline so it cannot be re-published (the usage event arriving after a
+ * prune still carries the pre-prune step's totals), and `UsageTracker.isStale`
+ * flags the window where no post-prune delta exists yet - the hook then trusts
+ * the measurement alone instead of maxing the stale number back in, otherwise
+ * the model is re-nudged with the pre-prune percentage it just acted on. The
+ * prune itself is answered once by `maybePruneAck`, which resolves the earlier
+ * reminder and states whether another pass is warranted.
+ *
+ * Rate limiting: at most one active reminder (nudge or ack) per
  * `nudgeFrequency` transcript messages; anchors clear when a compression
- * completes.
+ * completes and the ack immediately re-seeds them.
  */
 
 export interface UsageInfo {
@@ -54,17 +65,23 @@ export function usageTotal(usage: UsageInfo | undefined): number {
 export class UsageTracker {
   private readonly baseline = new Map<string, UsageInfo>()
   private readonly current = new Map<string, number>()
+  /** Prune counter per session; bumped by `markPruned`. */
+  private readonly epoch = new Map<string, number>()
+  /** Epoch at which `current` was recorded (delta or measurement). */
+  private readonly currentEpoch = new Map<string, number>()
 
   record(sessionId: string, tokens: UsageInfo): void {
     const base = this.baseline.get(sessionId)
     this.baseline.set(sessionId, { ...tokens })
     if (!base) {
-      // First event after construction/reset only arms the baseline; keep any
-      // seeded estimate in place until a real delta exists.
+      // First event after construction/reset - or the event landing right
+      // after a prune, whose baseline markPruned dropped - only arms the
+      // baseline; keep any seeded estimate in place until a real delta exists.
       return
     }
     const delta = usageTotal(tokens) - usageTotal(base)
     this.current.set(sessionId, Math.max(0, delta))
+    this.currentEpoch.set(sessionId, this.epoch.get(sessionId) ?? 0)
   }
 
   /**
@@ -78,6 +95,7 @@ export class UsageTracker {
   seed(sessionId: string, tokens: number): void {
     if (tokens <= 0 || this.baseline.has(sessionId)) return
     this.current.set(sessionId, tokens)
+    this.currentEpoch.set(sessionId, this.epoch.get(sessionId) ?? 0)
   }
 
   /** Estimated current context size in tokens for the session. */
@@ -85,10 +103,43 @@ export class UsageTracker {
     return this.current.get(sessionId) ?? 0
   }
 
+  /**
+   * Marks a prune as having happened: any estimate on hand describes the
+   * PRE-prune prompt. The estimate is zeroed outright (nothing may re-report
+   * the number the model just acted on) and the baseline is dropped, so the
+   * usage event that lands next - whose totals still include the pre-prune
+   * step - only re-arms the delta instead of publishing it; the first honest
+   * post-prune delta arrives one event after that. Until a real delta or a
+   * fresh measurement records against the new epoch, `isStale` tells consumers
+   * to trust the transcript measurement instead.
+   */
+  markPruned(sessionId: string): void {
+    this.epoch.set(sessionId, (this.epoch.get(sessionId) ?? 0) + 1)
+    this.current.set(sessionId, 0)
+    this.baseline.delete(sessionId)
+  }
+
+  /**
+   * True while `current` predates the newest prune - i.e. `totalFor` would
+   * report the pre-prune occupancy, which is exactly the stale number that
+   * makes a model re-prune work it already pruned.
+   */
+  isStale(sessionId: string): boolean {
+    return (this.currentEpoch.get(sessionId) ?? 0) < (this.epoch.get(sessionId) ?? 0)
+  }
+
   reset(sessionId: string): void {
     this.baseline.delete(sessionId)
     this.current.delete(sessionId)
+    this.epoch.delete(sessionId)
+    this.currentEpoch.delete(sessionId)
   }
+}
+
+/** Appends a rate-limit anchor, capped so old anchors cannot linger. */
+function pushAnchor(state: { nudgeAnchors: number[] }, messageCount: number): void {
+  state.nudgeAnchors.push(messageCount)
+  if (state.nudgeAnchors.length > NUDGE_ANCHOR_CAP) state.nudgeAnchors.shift()
 }
 
 /**
@@ -114,12 +165,51 @@ export function maybeContextNudge(input: {
 
   if (input.usageTokens < budget) return undefined
 
-  state.nudgeAnchors.push(messageCount)
-  if (state.nudgeAnchors.length > 8) state.nudgeAnchors.shift()
-  // Percent is of the BUDGET (which is what the rendered label names), not the
-  // full model window: the "~X% of budget (Y tokens)" reminder must agree.
-  const percent = Math.min(999, Math.round((input.usageTokens / Math.max(1, budget)) * 100))
-  return CONTEXT_LIMIT_NUDGE(percent, `${budget.toLocaleString()} tokens`)
+  pushAnchor(state, messageCount)
+  // The reminder names both denominators (budget, and the model window when it
+  // differs): a bare percentage of the BUDGET is what reads as a wrong or
+  // stale number to a model that only knows its window.
+  return CONTEXT_LIMIT_NUDGE(input.usageTokens, budget, input.modelContextLimit)
+}
+
+/**
+ * One-shot reply to a completed prune, returned on the first dispatch after
+ * it and undefined everywhere else (the ack sequence is consumed on sight,
+ * whether or not a reminder is rendered).
+ *
+ * It resolves the pressure reminder the model just acted on - whose
+ * percentage predates the prune - with a number measured on THIS dispatch,
+ * and states whether another pass is warranted. It also re-seeds the
+ * rate-limit anchor, so a fresh nudge cannot fire on the very next dispatch
+ * with the pre-prune estimate.
+ */
+export function maybePruneAck(input: {
+  state: { pruneSeq: number; pruneAckSeq: number; nudgeAnchors: number[] }
+  config: DcpOptions
+  usageTokens: number
+  modelContextLimit: number
+  messageCount: number
+  blockRef?: string
+  /** Messages the last compression covered; 0 means a pure re-summarize. */
+  messagesCovered?: number
+}): string | undefined {
+  const { state, config } = input
+  if (state.pruneSeq <= state.pruneAckSeq) return undefined
+  // Consume first: whatever happens next (restart, an unusual budget) the ack
+  // cannot repeat for the same prune.
+  state.pruneAckSeq = state.pruneSeq
+  pushAnchor(state, input.messageCount)
+
+  const budget = resolveLimit(config.maxContextLimit, input.modelContextLimit)
+  if (budget <= 0) return undefined
+  return POST_PRUNE_ACK(
+    input.usageTokens,
+    budget,
+    input.modelContextLimit,
+    input.blockRef,
+    input.usageTokens >= budget,
+    input.messagesCovered,
+  )
 }
 
 /** Iteration nudge: many assistant-only messages since the last user turn. */

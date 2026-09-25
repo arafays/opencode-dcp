@@ -1,6 +1,6 @@
 import type { DcpOptions } from "./config";
 import type { Logger } from "./logger";
-import { maybeContextNudge, maybeIterationNudge, type UsageTracker } from "./nudges";
+import { maybeContextNudge, maybeIterationNudge, maybePruneAck, type UsageTracker } from "./nudges";
 import {
   applyCompressionBlocks,
   injectBoundaryTags,
@@ -8,6 +8,9 @@ import {
   pruneToolOutputs,
 } from "./prune";
 import { createSyntheticBlockMessage } from "./transcript/edit";
+import { FALLBACK_CONTEXT_WINDOW } from "./constants";
+import { PRUNE_TOOL_NAME } from "./prune-tool";
+import { formatBlockRef } from "./refs";
 import type { TranscriptMirror } from "./transcript/mirror";
 import { scanTranscript } from "./transcript/scan";
 import { activeBlocks, type StateStore } from "./state/store";
@@ -28,7 +31,7 @@ import type { SystemPart, WireMessage } from "./types";
  * The `ctx.session.hook("context", ...)` handler. Runs on every outbound model
  * dispatch and applies the full DCP pipeline to the transcript copy:
  *
- *   scan -> refs -> block application -> pruning -> boundary tags -> nudges
+ *   scan -> refs -> block application -> pruning -> boundary tags -> reminders
  *
  * All edits are outbound-only: array slots are replaced/spliced, never
  * deep-mutating stored session messages.
@@ -43,6 +46,14 @@ export interface SessionContextEvent {
   readonly sessionID: string;
   readonly agent: string;
   readonly model: { readonly providerID: string; readonly id: string; readonly variant?: string };
+  /**
+   * Effective tool set for this request, keyed by the name the model sees.
+   * Populated by opencode-v2 (`SessionContext.tools`); absent on older betas,
+   * so every reader must treat it as optional.
+   */
+  tools?: Record<string, { description?: string; input?: unknown }>;
+  /** Request generation options (also absent on older betas). */
+  options?: Record<string, unknown>;
   system: SystemPart[];
   messages: WireMessage[];
 }
@@ -238,16 +249,51 @@ async function injectNudges(
   // so first-dispatch consumers of `totalFor` - like the prune tool's usage
   // note - are not blind after a restart or revert either.
   deps.usage.seed(event.sessionID, measuredTokens);
-  const usageTokens = Math.max(deps.usage.totalFor(event.sessionID), measuredTokens);
-  if (usageTokens > 0) {
-    const nudge = maybeContextNudge({
-      state,
-      config: deps.config,
-      usageTokens,
-      modelContextLimit: modelContextLimit ?? 200_000,
-      messageCount,
-    });
-    if (nudge) reminders.push(nudge);
+  // A provider delta recorded BEFORE the newest prune describes the pre-prune
+  // prompt: max()ing it back in would re-nudge the model with the exact number
+  // it just acted on. On that dispatch only the measurement is current, so it
+  // wins outright instead of joining the max.
+  const usageTokens = deps.usage.isStale(event.sessionID)
+    ? measuredTokens
+    : Math.max(deps.usage.totalFor(event.sessionID), measuredTokens);
+  // The window is always defined: an unlisted/limit-less model falls back to
+  // the default, so every reminder can name both denominators.
+  const window = modelContextLimit ?? FALLBACK_CONTEXT_WINDOW;
+
+  // A completed prune answers its own pressure reminder on this dispatch -
+  // before any new nudge can fire off the pre-prune estimate.
+  const lastCompression = state.stats.recentCompressions.at(-1);
+  const ack = maybePruneAck({
+    state,
+    config: deps.config,
+    usageTokens,
+    modelContextLimit: window,
+    messageCount,
+    blockRef: lastCompression ? formatBlockRef(lastCompression.blockId) : undefined,
+    messagesCovered: lastCompression?.messagesCovered,
+  });
+  if (ack) {
+    // The ack supersedes this dispatch's nudge: it carries the current number
+    // and resolves the reminder the model just acted on.
+    reminders.push(ack);
+  } else {
+    // A context nudge is only actionable when the model can actually call
+    // `prune`. Core refuses a call whose tool is absent from the request's
+    // definition map ("Tool is not available for this request"), so when another
+    // transform dropped the tool, or permission rules hid it, or registration
+    // failed, the reminder would be pure noise. `tools` is optional because
+    // older betas never sent it - there we keep nudging rather than going silent.
+    const canPrune = !event.tools || Object.hasOwn(event.tools, PRUNE_TOOL_NAME);
+    if (canPrune && usageTokens > 0) {
+      const nudge = maybeContextNudge({
+        state,
+        config: deps.config,
+        usageTokens,
+        modelContextLimit: window,
+        messageCount,
+      });
+      if (nudge) reminders.push(nudge);
+    }
   }
 
   const iterationNudge = maybeIterationNudge({

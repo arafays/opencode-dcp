@@ -53,6 +53,14 @@ export interface SessionState {
   nextBlockId: number
   /** Rate-limit anchors for the context nudge (transcript message counts). */
   nudgeAnchors: number[]
+  /**
+   * Counts successful prunes. The context hook compares it against
+   * `pruneAckSeq` to know a prune still owes the model one acknowledgement
+   * reminder (the dispatch that resolves the pre-prune pressure reminder).
+   */
+  pruneSeq: number
+  /** Highest `pruneSeq` already acknowledged by a dispatched reminder. */
+  pruneAckSeq: number
   stats: SessionStats
   updatedAt: number
 }
@@ -66,6 +74,8 @@ export function createSessionState(sessionId: string): SessionState {
     activeBlockIds: [],
     nextBlockId: 1,
     nudgeAnchors: [],
+    pruneSeq: 0,
+    pruneAckSeq: 0,
     stats: { totalPrunedTokens: 0, compressRuns: 0, dispatches: 0, recentCompressions: [] },
     updatedAt: Date.now(),
   }
@@ -93,6 +103,12 @@ export function hydrateSessionState(json: unknown, sessionId: string): SessionSt
   if (typeof raw.nextBlockId === "number") base.nextBlockId = Math.max(1, Math.floor(raw.nextBlockId))
   if (Array.isArray(raw.nudgeAnchors)) {
     base.nudgeAnchors = raw.nudgeAnchors.filter((id): id is number => typeof id === "number")
+  }
+  if (typeof raw.pruneSeq === "number" && Number.isFinite(raw.pruneSeq)) {
+    base.pruneSeq = Math.max(0, Math.floor(raw.pruneSeq))
+  }
+  if (typeof raw.pruneAckSeq === "number" && Number.isFinite(raw.pruneAckSeq)) {
+    base.pruneAckSeq = Math.max(0, Math.floor(raw.pruneAckSeq))
   }
   if (raw.stats && typeof raw.stats === "object") {
     const stats = raw.stats as Record<string, unknown>

@@ -8,7 +8,7 @@
           "enabled": true
         },
         "debug": true,
-        "maxContextLimit": 70000
+        "maxContextLimit": 120000
       }
     }
   ],

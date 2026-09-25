@@ -81,12 +81,20 @@ outbound transcript only — stored session history is never modified:
 4. **Pruning** — superseded/errored tool outputs are replaced with short
    placeholders (protected tools like `question`/`edit` are never touched).
 5. **Nudges** — when provider usage crosses `maxContextLimit`, a reminder asks
-   the model to run `prune`; rate-limited by `nudgeFrequency`.
+   the model to run `prune`; rate-limited by `nudgeFrequency`. Reminders name
+   both denominators (the pruning budget and the model window) and re-measure
+   per dispatch, so an older percentage is never acted on. A completed prune is
+   answered by a one-shot acknowledgement on the next dispatch that quotes the
+   fresh measurement and says whether another pass is needed.
 
-The model calls **`prune`** itself (registered with the platform default
-`codemode: true`, so it is exposed through the Code Mode `tools.prune`
-catalog in agentic sessions; named `prune` to avoid clashing with the platform's
-built-in compress tool). It picks non-overlapping ranges by boundary ID and writes
+The model calls **`prune`** itself. It is deliberately registered as a **direct**
+tool (`options.codemode: false`, never the platform's `codemode: true` default):
+only `codemode === false` tools are emitted as native tool definitions, so the
+full `PRUNE_RANGE` boundary-ID rules ship on every request instead of being
+folded into the Code Mode `execute` catalog, whose inline listings truncate each
+tool's first line to 120 characters. The name `prune` avoids clashing with the
+platform's built-in compress tool, and `options.permission: "prune"` pins the
+permission action to the tool's own name. It picks non-overlapping ranges by boundary ID and writes
 dense summaries per range. A range may cover previously pruned blocks: including
 `(bN)` carries that block's full content forward, omitting it permanently drops
 the block's content from context — how stale completed work gets pruned.

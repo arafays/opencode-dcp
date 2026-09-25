@@ -38,8 +38,11 @@ export default Plugin.define({
   // itself (package `./tui` export or sibling tui.* file) — it is not part of
   // the `Plugin` type, and passing `tui: true` here is a type error.
   setup: async (ctx) => {
+    // Config warnings predate config resolution (hence a separate logger);
+    // warn output ignores the debug flag, it always lands in opencode.log.
+    const configWarning = createLogger(false);
     const config = resolveOptions(ctx.options, (message) =>
-      console.error(`[dcp] config warning: ${message}`),
+      configWarning.warn(`config warning: ${message}`),
     );
     const logger = createLogger(config.debug);
 
@@ -53,25 +56,50 @@ export default Plugin.define({
     const usage = new UsageTracker();
 
     // Model context-window cache (provider/model -> tokens).
+    //
+    // A model absent from the cache is either "not listed yet" or "listed with
+    // no limit" - both resolve to `undefined` and both fall back downstream.
+    // The retry gate is what keeps a missing key from re-listing the catalog on
+    // every single dispatch: a failed or incomplete listing is retried after
+    // `catalogRetryAt`, not never (the old `catalogListed` latch) and not
+    // always (an unbounded retry loop).
     const contextLimits = new Map<string, number | undefined>();
-    let catalogListed = false;
+    /** Earliest time a (re)listing may run; also caps retries after a failure. */
+    let catalogRetryAt = 0;
+    const CATALOG_RETRY_MS = 60_000;
+    /** In-flight catalog listing; concurrent dispatches await it instead of starting their own. */
+    let catalogInflight: Promise<void> | undefined;
+
     const catalogContextLimit = async (
       providerID: string,
       modelId: string,
     ): Promise<number | undefined> => {
       const key = `${providerID}/${modelId}`;
-      if (!catalogListed && !contextLimits.has(key)) {
+      if (contextLimits.has(key)) return contextLimits.get(key);
+      if (Date.now() < catalogRetryAt) return undefined;
+      // Single-flight: catalogRetryAt only arms when a listing COMPLETES, so
+      // while one is in flight (a hung modelApi.list above all) every
+      // concurrent dispatch would otherwise start its own listing. Followers
+      // await the flight, then read whatever it produced (cache entry, or
+      // undefined alongside the armed retry gate after a failure).
+      if (catalogInflight) {
+        await catalogInflight.catch(() => {});
+        return contextLimits.get(key);
+      }
+      const flight = (async () => {
         try {
-          const catalogCtx = ctx as unknown as CatalogContextShim;
-          const response = catalogCtx.model
-            ? await catalogCtx.model.list()
-            : await catalogCtx.catalog?.model?.list();
+          const modelApi = (ctx as unknown as CatalogContextShim).model;
+          if (!modelApi) throw new Error("plugin context exposes no model domain");
+          const response = await modelApi.list();
           const models = unwrapList<{
             providerID: string;
             id: string;
             limit?: { context?: number };
           }>(response);
-          for (const model of models ?? []) {
+          // An unparseable payload is a failed listing, not an empty catalog:
+          // fall through to the retry gate instead of poisoning the cache.
+          if (!models) throw new Error("model catalog response had no data array");
+          for (const model of models) {
             if (typeof model?.providerID === "string" && typeof model?.id === "string") {
               contextLimits.set(
                 `${model.providerID}/${model.id}`,
@@ -79,12 +107,22 @@ export default Plugin.define({
               );
             }
           }
+          // Listed successfully. Any model still missing (a provider that
+          // published it later, or one with no limit) is re-checked on this
+          // schedule rather than on every dispatch.
+          catalogRetryAt = Date.now() + CATALOG_RETRY_MS;
         } catch (error) {
-          logger.warn("failed to list model catalog for context limits", {
+          logger.warn("failed to list model catalog for context limits; retrying later", {
             error: error instanceof Error ? error.message : String(error),
           });
+          catalogRetryAt = Date.now() + CATALOG_RETRY_MS;
         }
-        catalogListed = true;
+      })();
+      catalogInflight = flight;
+      try {
+        await flight;
+      } finally {
+        if (catalogInflight === flight) catalogInflight = undefined;
       }
       return contextLimits.get(key);
     };
@@ -171,6 +209,32 @@ export default Plugin.define({
       await handleContext(typed);
     });
 
+    // Observe prune executions with the authoritative IDs the transcript scan
+    // cannot provide (messageID, status, input-decode failures our body never
+    // sees). tool.hook has no tool-name filter, so filter client-side; log
+    // only — the callback must never throw (a throwing hook fails the tool
+    // run) and never mutates.
+    await ctx.tool.hook("execute.after", (event) => {
+      if (event.tool !== "prune") return;
+      try {
+        if (event.status === "error") {
+          logger.warn("prune tool call failed", {
+            messageID: event.messageID,
+            sessionID: event.sessionID,
+            agent: event.agent,
+            error: String(event.error),
+          });
+        } else {
+          logger.debug("prune tool call completed", {
+            messageID: event.messageID,
+            sessionID: event.sessionID,
+          });
+        }
+      } catch {
+        // Defensive: hook callbacks must never propagate.
+      }
+    });
+
     await ctx.tool.transform((tools) => {
       addTool(
         tools as unknown as AddableTools,
@@ -184,12 +248,16 @@ export default Plugin.define({
             if (!model) return undefined;
             const key = `${model.providerID}/${model.id}`;
             const cached = contextLimits.get(key);
-            if (cached !== undefined || catalogListed) return cached;
-            // Populate asynchronously; the next dispatch/prune sees it.
+            if (cached !== undefined) return cached;
+            // Wait out an in-flight/recent retry window instead of re-listing
+            // the catalog on every single prune call; once the window opens,
+            // repopulate asynchronously (the next dispatch/prune sees it).
+            if (Date.now() < catalogRetryAt) return undefined;
             void catalogContextLimit(model.providerID, model.id).catch(() => {});
             return undefined;
           },
           getUsageTokens: (sessionId) => usage.totalFor(sessionId),
+          markPruned: (sessionId) => usage.markPruned(sessionId),
           recordCompression,
         }),
       );
@@ -202,13 +270,70 @@ export default Plugin.define({
     // Background event pump; aborted when the plugin unloads.
     const controller = new AbortController();
     void startEventPump({
-      subscribe: () => ctx.event.subscribe(),
+      subscribe: () => ctx.event.subscribe({ signal: controller.signal }),
       store,
       mirror,
       usage,
       logger,
       signal: controller.signal,
     });
+
+    // Storage GC — startup reconcile. session.deleted (lib/events.ts) drops
+    // state while we're up; sessions deleted while the plugin was down leave
+    // orphaned `session/*` keys forever. The plugin contract exposes no
+    // session.list, so probe each persisted key with session.get and delete
+    // ONLY a positively identified not-found: the declared body carries
+    // _tag/name "SessionNotFoundError" (declared() copies body fields onto
+    // the Error and sets name = _tag), its message, or an UnexpectedStatus
+    // ClientError whose cause carries status 404. Transport/5xx/malformed
+    // errors keep the key — an orphan is cheap, a wrongly deleted live
+    // session would lose its compression blocks. storage.scan exists on the
+    // context storage but not on our StateStore storage type, so scan via
+    // ctx.storage directly.
+    const isSessionNotFoundError = (error: unknown): boolean => {
+      if (!error || typeof error !== "object") return false;
+      const e = error as {
+        _tag?: unknown;
+        name?: unknown;
+        message?: unknown;
+        reason?: unknown;
+        cause?: unknown;
+      };
+      if (e._tag === "SessionNotFoundError" || e.name === "SessionNotFoundError") return true;
+      if (e.message === "Session not found") return true;
+      const cause = e.cause as { status?: unknown } | undefined;
+      return e.name === "ClientError" && e.reason === "UnexpectedStatus" && cause?.status === 404;
+    };
+    void (async () => {
+      try {
+        const prefix = "session/";
+        let after: string | undefined;
+        for (;;) {
+          const page = await ctx.storage.scan(
+            after === undefined ? { prefix } : { prefix, after },
+          );
+          for (const entry of page.entries) {
+            const sessionId = entry.key.slice(prefix.length);
+            if (!sessionId) continue;
+            try {
+              await ctx.session.get({ sessionID: sessionId });
+            } catch (error) {
+              if (!isSessionNotFoundError(error)) continue;
+              await ctx.storage.remove(entry.key);
+              logger.debug("storage GC; removed orphaned session state", {
+                key: entry.key,
+              });
+            }
+          }
+          if (!page.next) break;
+          after = page.next;
+        }
+      } catch (error) {
+        logger.warn("startup reconcile failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    })();
 
     logger.debug("initialized", {
       maxContextLimit: config.maxContextLimit,
@@ -254,27 +379,13 @@ type CatalogContextShim = {
 };
 
 /**
- * Tool registration compatibility across beta generations.
- *
- * - Current tagged `@opencode/plugin@latest` types: `tools.add(tool)` where the
- *   definition object carries `name` and registration `options`.
- * - Documented V2 shape: `tools.add(name, tool, options?)`.
- *
- * Declared-function arity distinguishes them reliably (`options?` is excluded
- * from `Function.length`).
+ * Tool registration shape (`@opencode/plugin` promise API):
+ * `tools.add(tool)` where the definition object carries `name`, `input`,
+ * `description`, `execute` and registration `options`.
  */
-type AddableTools = { add: (...args: unknown[]) => void };
+type AddableTools = { add: (definition: unknown) => void };
 
-function addTool(
-  tools: AddableTools,
-  definition: { name: string } & Record<string, unknown>,
-): void {
+function addTool(tools: AddableTools, definition: unknown): void {
   if (typeof tools.add !== "function") return;
-  if (tools.add.length >= 2) {
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    const { name, options, ...tool } = definition;
-    tools.add(name, tool, options);
-  } else {
-    tools.add(definition);
-  }
+  tools.add(definition);
 }

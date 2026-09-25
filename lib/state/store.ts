@@ -158,6 +158,9 @@ export function applyCompression(input: {
   state.activeBlockIds.push(blockId)
   state.stats.compressRuns += 1
   state.nudgeAnchors = []
+  // The next dispatch owes the model one acknowledgement: the pressure
+  // reminder it just acted on describes the pre-prune context.
+  state.pruneSeq += 1
   return block
 }
 

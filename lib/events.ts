@@ -7,8 +7,10 @@ import type { TranscriptMirror } from "./transcript/mirror"
  * Background event pump. Consumes the public server event stream for:
  *
  * - `session.usage.updated`  -> per-session context usage (drives nudges)
- * - `session.compaction.*`   -> native compaction rewrites history: reset DCP
+ * - `session.compaction.started|ended` -> native compaction rewrites history
+ * - `session.compaction.failed`  -> started already reset; history unchanged
  * - `session.revert.committed` -> history truncated: reset DCP
+ * - `session.forked`          -> new session id, parent's blocks do not apply
  * - `session.deleted`        -> drop all session state
  *
  * The pump runs detached from setup and is aborted via the cleanup function.
@@ -66,7 +68,9 @@ export function startEventPump(input: {
             }
             case "session.compaction.started":
             case "session.compaction.ended":
+            case "session.compaction.failed":
             case "session.revert.committed":
+            case "session.forked":
             case "session.deleted": {
               if (!sessionId) break
               store.reset(sessionId)
@@ -76,6 +80,11 @@ export function startEventPump(input: {
                 sessionId,
                 reason: event.type,
               })
+              // This event is the primary storage-GC path. The complementary
+              // startup reconcile lives in index.ts (setup): storage.scan +
+              // per-key session.get, deleting only positively identified
+              // SessionNotFoundError keys — it catches sessions deleted while
+              // the plugin was down, which this in-process listener misses.
               break
             }
             default:
