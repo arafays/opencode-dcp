@@ -610,3 +610,131 @@ test("opaque non-media strings and text/* data URIs are still counted as text", 
   ];
   assert.ok(measureMessagesChars(filePath) > "/tmp/report.pdf".length);
 });
+
+test("a string that merely starts with `data:` is text, not a media payload", () => {
+  // Recognition needs an RFC 2397 separator (`;` parameters or the `,` that
+  // opens the payload). Guessing `other` for these charged 4,000 tokens each,
+  // which is the same phantom-pressure failure as the 4MB image, self-inflicted.
+  const prose = [
+    "data:,hello",
+    "data:x",
+    "data:image/png is a format, not a URI",
+    // No separator anywhere in the 128-char scan window.
+    `data:${"lorem ipsum dolor sit amet ".repeat(20)}`,
+  ];
+  for (const text of prose) {
+    const chars = measureMessagesChars([{ role: "user", content: [{ type: "text", text }] }]);
+    assert.ok(
+      chars >= text.length,
+      `text must be counted in full: ${JSON.stringify(text.slice(0, 24))}`,
+    );
+    assert.ok(
+      estimateTokens(chars) < 200,
+      `must not be charged a media allowance: ${JSON.stringify(text.slice(0, 24))} -> ${estimateTokens(chars)}`,
+    );
+  }
+
+  // An empty media type is legal (RFC 2397 omits it) but says nothing about
+  // the payload, so it is priced as text rather than guessed at.
+  const emptyType = "data:;base64,QUJDREVGR0g=";
+  assert.ok(tokensFor([{ role: "user", content: [{ type: "text", text: emptyType }] }]) < 200);
+
+  // A genuine data URI still resolves, including one whose media type is long
+  // enough to need most of the scan window.
+  assert.ok(tokensFor([{ role: "user", content: [{ type: "text", text: "data:image/png;base64,AAAA" }] }]) >= 1_600);
+  const longMime = `data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,${"A".repeat(1_000)}`;
+  assert.ok(
+    longMime.indexOf(";base64,") > 64,
+    "fixture must exceed the old 64-char scan window",
+  );
+  assert.ok(tokensFor([{ role: "user", content: [{ type: "text", text: longMime }] }]) >= 4_000);
+});
+
+test("an inline text/* payload is measured as text in every wire shape", () => {
+  // Base64 is 1.33x the decoded text, so chars/4 is a bounded over-count and
+  // far better than any flat guess. Skipping the payload while the `text`
+  // allowance is 0 charged a 400KB base64 document at 9 tokens - an
+  // under-estimate, i.e. hidden pressure rather than phantom pressure.
+  const payload = "A".repeat(400_000);
+  const viaDataUri = `data:text/plain;base64,${payload}`;
+  const viaSource = {
+    role: "user",
+    content: [
+      {
+        type: "media",
+        media: {
+          source: { type: "base64", data: payload, mediaType: "text/plain" },
+          mediaType: "text/plain",
+        },
+      },
+    ],
+  };
+  const viaBytes = {
+    role: "user",
+    content: [
+      {
+        type: "media",
+        media: {
+          source: { type: "bytes", data: new Uint8Array(400_000), mediaType: "text/csv" },
+          mediaType: "text/csv",
+        },
+      },
+    ],
+  };
+  const viaFlattened = {
+    role: "user",
+    content: [{ type: "media", mediaType: "text/markdown", data: payload }],
+  };
+
+  for (const message of [viaSource, viaBytes, viaFlattened]) {
+    const tokens = tokensFor([message]);
+    assert.ok(
+      tokens > 90_000,
+      `inline text payload must be measured, got ${tokens} tokens`,
+    );
+  }
+  // The data-URI spelling and the nested spelling must agree; they are the
+  // same bytes and the estimate is the only thing that differs.
+  const dataUriTokens = tokensFor([
+    { role: "user", content: [{ type: "text", text: viaDataUri }] },
+  ]);
+  const sourceTokens = tokensFor([viaSource]);
+  assert.ok(
+    Math.abs(dataUriTokens - sourceTokens) < 100,
+    `the two encodings of one payload must price alike: ${dataUriTokens} vs ${sourceTokens}`,
+  );
+});
+
+test("media is only priced at a part that declares itself media", () => {
+  // A `type` tag alone is not media. Tool results and provider metadata are
+  // free-form JSON from arbitrary sources, so `{ type: "url", url }` and
+  // `{ type: "ref", id }` must not claim a 4,000-token allowance.
+  const impostors = [
+    { type: "url", url: "https://example.com/x" },
+    { type: "ref", id: "file-abc123" },
+    { type: "bytes", data: "QUJD" },
+    { type: "base64", data: "QUJD" },
+  ];
+  for (const impostor of impostors) {
+    const message = { role: "user", content: [{ type: "text", text: "hi" }], providerMetadata: impostor };
+    const tokens = tokensFor([message]);
+    assert.ok(tokens < 50, `non-media object charged ${tokens} tokens: ${JSON.stringify(impostor)}`);
+  }
+
+  // The same shapes INSIDE a media part are still priced, and `ref` needs the
+  // `provider` field `MediaSource` defines to tell it apart from an impostor.
+  const handles = [
+    { type: "url", url: "https://example.com/x", mediaType: "image/png" },
+    { type: "ref", id: "file-abc123", provider: "openai", mediaType: "image/png" },
+  ];
+  for (const source of handles) {
+    const message = {
+      role: "user",
+      content: [{ type: "media", media: { source, mediaType: "image/png" } }],
+    };
+    assert.ok(
+      tokensFor([message]) >= 1_600,
+      `media handle must claim the allowance: ${JSON.stringify(source)}`,
+    );
+  }
+});

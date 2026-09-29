@@ -293,11 +293,11 @@ test("assignRefs skips keys already covered by an active compression block", asy
   await run(hook, fixture());
 
   // Covered keys are invisible to the model: no refs are burned on them.
-  assert.equal(runtime.refs.refOf("id:u1"), undefined);
-  assert.equal(runtime.refs.refOf("id:a1"), undefined);
+  assert.equal(runtime.refs.byKey.get("id:u1"), undefined);
+  assert.equal(runtime.refs.byKey.get("id:a1"), undefined);
   // Uncovered keys still allocate refs, starting from m0001.
-  assert.equal(runtime.refs.refOf("id:t1"), "m0001");
-  assert.equal(runtime.refs.refOf("id:u2"), "m0003");
+  assert.equal(runtime.refs.byKey.get("id:t1"), "m0001");
+  assert.equal(runtime.refs.byKey.get("id:u2"), "m0003");
 });
 
 test("dispatch stats carry the resolved context limit for the TUI", async () => {
@@ -613,11 +613,11 @@ test("boundary tags are dense and ascending after a compression, and stay resolv
   const secondTags = assertAscendingTags(second, runtime.refs);
   // Numbering restarts at m0001 for the first SURVIVOR. That survivor is an
   // assistant message (a2), so the first tag the model READS is the next one.
-  assert.equal(runtime.refs.refOf("id:a2"), "m0001");
+  assert.equal(runtime.refs.byKey.get("id:a2"), "m0001");
   assert.equal(secondTags[0], "m0002");
-  assert.equal(runtime.refs.refOf("id:u1"), undefined, "covered keys are unaddressable");
+  assert.equal(runtime.refs.byKey.get("id:u1"), undefined, "covered keys are unaddressable");
   // ...and the turn that arrived after the compression is the highest address.
-  assert.equal(runtime.refs.refOf("id:t7"), "m0017");
+  assert.equal(runtime.refs.byKey.get("id:t7"), "m0017");
   assert.ok(secondTags.includes("m0017"), `new turn must be aliased, got ${secondTags}`);
   // The block summary is addressed as b1, never as an mNNNN.
   assert.equal(tagsOf(second)[0], "b1");
@@ -629,7 +629,7 @@ test("boundary tags are dense and ascending after a compression, and stay resolv
   await dispatch(withAck);
   const thirdTags = assertAscendingTags(withAck, runtime.refs);
   assert.deepEqual(thirdTags, secondTags);
-  assert.equal(runtime.refs.refOf("id:t7"), "m0017", "the tail keeps its address");
+  assert.equal(runtime.refs.byKey.get("id:t7"), "m0017", "the tail keeps its address");
 
   // The platform reminder DCP itself appends has no message id, so its key is
   // positional (`user#N`) and shifts when the block summary is spliced in front
@@ -639,7 +639,7 @@ test("boundary tags are dense and ascending after a compression, and stay resolv
   // mis-addressed. Key derivation is deliberately frozen; see scan.ts.
   assert.equal(tagsOf(withAck).at(-1), "", "a shifted positional key gets no tag, not a wrong one");
   assert.equal([...runtime.refs.byKey.values()].at(-1), "m0018", "the tail consumed the last address");
-  assert.equal(runtime.refs.refOf("id:t7"), "m0017", "real messages keep their address");
+  assert.equal(runtime.refs.byKey.get("id:t7"), "m0017", "real messages keep their address");
 
   // A range spanning the whole visible transcript is therefore always
   // well-ordered: the model can compare the two numbers it was shown.

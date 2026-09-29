@@ -143,8 +143,14 @@ function mediaAllowanceChars(kind: MediaKind): number {
 }
 
 const DATA_URI_PREFIX = "data:";
-/** Longest MIME header a `data:` URI is scanned for; bounds the parse. */
-const DATA_URI_MIME_SCAN = 64;
+/**
+ * Longest MIME header a `data:` URI is scanned for; bounds the parse. Sized
+ * for the longest real media type
+ * (`application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` is
+ * 66 chars) plus room for `;base64` parameters, so a genuine data URI always
+ * resolves its separator inside the window.
+ */
+const DATA_URI_MIME_SCAN = 128;
 
 /**
  * Flat media allowance for a `data:<mime>[;...];base64,<payload>` URI, or `-1`
@@ -157,6 +163,14 @@ const DATA_URI_MIME_SCAN = 64;
  * (`packages/core/src/tool/mcp.ts`, `.../plugin/mcp-resource.ts`) and codemode
  * file results (`packages/core/src/codemode/tool.ts`) all inline media as a
  * data URI under that field.
+ *
+ * Recognition requires a real RFC 2397 separator: either `;` introducing
+ * parameters (`;base64,`) or the `,` that opens the payload. A string that
+ * merely starts with `data:` is not enough - `data:,hello`, `data:x` and
+ * prose like "data:image/png is a format" are ordinary text, and guessing
+ * `other` for them charged 4,000 tokens each. An empty media type
+ * (`data:,<payload>`, legal per RFC 2397) is likewise not a media type we can
+ * price, so it falls back to the chars/token estimate.
  */
 function dataUriAllowanceChars(value: string): number {
   if (value.length <= DATA_URI_PREFIX.length) return -1;
@@ -169,8 +183,56 @@ function dataUriAllowanceChars(value: string): number {
     if (code === 59 /* ; */ || code === 44 /* , */) break;
     end += 1;
   }
-  const kind = mediaKindOf(value.slice(start, end));
+  // No separator anywhere in the window: not a data URI, just text that
+  // happens to begin with the scheme name.
+  if (end === limit) return -1;
+  const mediaType = value.slice(start, end);
+  // A separator is necessary but not sufficient - prose can contain one.
+  // "data:image/png is a format, not a URI" has a comma, and its slice reads
+  // `image/png is a format`, which starts with `image/` and was charged the
+  // 1,600-token image allowance. A real media type is `type/subtype` built
+  // only from RFC 2045 token characters, so it can never contain whitespace.
+  if (!isMediaType(mediaType)) return -1;
+  const kind = mediaKindOf(mediaType);
   return kind === "text" ? -1 : mediaAllowanceChars(kind);
+}
+
+/** True for a well-formed `type/subtype` of RFC 2045 token characters. */
+function isMediaType(value: string): boolean {
+  const slash = value.indexOf("/");
+  if (slash <= 0 || slash === value.length - 1) return false;
+  if (value.indexOf("/", slash + 1) !== -1) return false;
+  for (let index = 0; index < value.length; index += 1) {
+    if (!isTokenChar(value.charCodeAt(index))) return false;
+  }
+  return true;
+}
+
+function isTokenChar(code: number): boolean {
+  if (code >= 48 && code <= 57) return true; // 0-9
+  if (code >= 65 && code <= 90) return true; // A-Z
+  if (code >= 97 && code <= 122) return true; // a-z
+  // The RFC 2045 type/subtype separator, which `isMediaType` has already
+  // checked appears exactly once and never at either end.
+  if (code === 47) return true; // /
+  // The RFC 2045 token specials: ! # $ % & ' * + - . ^ _ ` | ~
+  return (
+    code === 33 ||
+    code === 35 ||
+    code === 36 ||
+    code === 37 ||
+    code === 38 ||
+    code === 39 ||
+    code === 42 ||
+    code === 43 ||
+    code === 45 ||
+    code === 46 ||
+    code === 94 ||
+    code === 95 ||
+    code === 96 ||
+    code === 124 ||
+    code === 126
+  );
 }
 
 /**
@@ -233,39 +295,103 @@ function measureFields(record: Record<string, unknown>, skipKey: string | undefi
   return total;
 }
 
+/**
+ * Charges one media item whose payload lives in `payloadKey`.
+ *
+ * A `text/*` payload is NOT opaque to the provider: base64 is 1.33x the decoded
+ * text, so the ordinary chars/token estimate is within a third of the truth and
+ * is strictly better than any flat guess. The caller must therefore NOT skip
+ * `payloadKey` in that case - skipping it while the allowance is 0 charged a
+ * 400 KB base64 document at 9 tokens, an under-estimate in the one direction
+ * that hides real pressure.
+ *
+ * A `bytes` source carrying text arrives as a `Uint8Array`, which
+ * `measurePartChars` charges at zero (a typed array must not be walked per
+ * byte), so its size is added here as characters. One byte is one character of
+ * the decoded text, making this the same ~1.33x over-count as the string form.
+ */
+function measureMediaItemChars(
+  kind: MediaKind,
+  record: Record<string, unknown>,
+  payloadKey: string,
+): number {
+  if (kind === "text") {
+    const payload = record[payloadKey];
+    if (ArrayBuffer.isView(payload)) {
+      return measureFields(record, payloadKey) + payload.byteLength;
+    }
+    return measureFields(record, undefined);
+  }
+  return mediaAllowanceChars(kind) + measureFields(record, payloadKey);
+}
+
 function measureObjectChars(record: Record<string, unknown>): number {
-  const type = record["type"];
-  // Media is charged where the bytes actually live, so the wrappers around it
-  // (`MediaPart` -> `Media.Asset` -> `Media.Source`) walk normally and never
-  // double-charge on the way down.
-  if (type === "media" && record["data"] !== undefined) {
-    // Legacy flattened form `{ type, mediaType, data }`. NOT the current wire
-    // shape (see `MediaPart` in lib/types.ts, which nests `media.source`) -
-    // kept because transcripts persisted by older builds still carry it.
-    const kind = mediaKindOf(asString(record["mediaType"]));
-    return mediaAllowanceChars(kind) + measureFields(record, "data");
+  // Media is recognised ONLY at a part that declares itself one, and is charged
+  // where the bytes actually live. Matching a `type` tag anywhere in the walk
+  // (a bare `{ type: "url", url }` in `providerMetadata` is not media) charged
+  // 4,000 tokens for a 40-byte object; going through the part keeps the
+  // wrappers (`MediaPart` -> `Media.Asset` -> `Media.Source`) walking normally
+  // so nothing double-charges on the way down.
+  if (record["type"] !== "media") return measureFields(record, undefined);
+
+  const asset = asRecord(record["media"]);
+  if (asset) {
+    // Current wire shape: `MediaPart.media` is a `Media.Asset` whose `source`
+    // owns the payload (see `MediaPart` in lib/types.ts).
+    const source = asRecord(asset["source"]);
+    return (
+      (source ? measureMediaSourceChars(source, mediaKindOf(asString(asset["mediaType"]))) : 0) +
+      measureFields(record, "media")
+    );
   }
-  // `Media.Source` (packages/ai/src/media.ts): `bytes` and `base64` own the
-  // payload, `url` and `ref` are handles the provider still materializes.
-  // Requiring the same-named companion field keeps ordinary `type`-tagged
-  // objects from matching.
-  if ((type === "bytes" || type === "base64") && record["data"] !== undefined) {
-    const kind = mediaKindOf(asString(record["mediaType"]));
-    return mediaAllowanceChars(kind) + measureFields(record, "data");
-  }
-  if (type === "url" && typeof record["url"] === "string") {
-    const kind = mediaKindOf(asString(record["mediaType"]));
-    return mediaAllowanceChars(kind) + measureFields(record, undefined);
-  }
-  if (type === "ref" && typeof record["id"] === "string") {
-    const kind = mediaKindOf(asString(record["mediaType"]));
-    return mediaAllowanceChars(kind) + measureFields(record, undefined);
+  // Legacy flattened form `{ type, mediaType, data }`. NOT what the hook
+  // receives - kept because transcripts persisted by older builds carry it.
+  if (record["data"] !== undefined) {
+    return measureMediaItemChars(mediaKindOf(asString(record["mediaType"])), record, "data");
   }
   return measureFields(record, undefined);
 }
 
+/**
+ * `Media.Source` (packages/ai/src/media.ts). `bytes` and `base64` own the
+ * payload; `url` and `ref` are handles the provider still materializes, so
+ * they are priced as documents rather than measured.
+ *
+ * `inheritedKind` is the asset's declared media type, used when the source
+ * omits its own.
+ */
+function measureMediaSourceChars(
+  source: Record<string, unknown>,
+  inheritedKind: MediaKind,
+): number {
+  const own = mediaKindOf(asString(source["mediaType"]));
+  const kind = own === "other" ? inheritedKind : own;
+  const type = source["type"];
+  if ((type === "bytes" || type === "base64") && source["data"] !== undefined) {
+    return measureMediaItemChars(kind, source, "data");
+  }
+  // A handle is not inline payload, so the `text: 0` shortcut (which is only
+  // sound when the bytes are in the transcript and can be measured) does not
+  // apply; a referenced text document is priced like any other document.
+  const handleKind: MediaKind = kind === "text" ? "pdf" : kind;
+  if (type === "url" && typeof source["url"] === "string") {
+    return mediaAllowanceChars(handleKind) + measureFields(source, undefined);
+  }
+  // `MediaSource` defines `ref` as `{ provider, id }`; requiring `provider`
+  // keeps ordinary `id`-bearing objects from matching.
+  if (type === "ref" && typeof source["id"] === "string" && typeof source["provider"] === "string") {
+    return mediaAllowanceChars(handleKind) + measureFields(source, undefined);
+  }
+  return measureFields(source, undefined);
+}
+
 function asString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  return value as Record<string, unknown>;
 }
 
 /** Builds the next snapshot by merging one dispatch/compression update. */

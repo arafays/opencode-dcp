@@ -110,29 +110,6 @@ export class RefRegistry {
   }
 
   /**
-   * Legacy single-key allocator: returns the key's existing ref, or claims
-   * the lowest free slot. NOT ordered, and therefore NOT safe for numbering a
-   * transcript — a `release`d low slot is handed out before a live high one,
-   * which is the inversion `project` exists to eliminate. Kept for callers
-   * that only need "give this key some ref" (tests, one-off lookups).
-   */
-  ensure(key: string): string {
-    const existing = this.byKey.get(key);
-    if (existing) return existing;
-    for (let candidate = MESSAGE_REF_MIN_INDEX; candidate <= MESSAGE_REF_MAX_INDEX; candidate++) {
-      const ref = formatMessageRef(candidate);
-      if (this.byRef.has(ref)) continue;
-      this.next = Math.max(this.next, candidate + 1);
-      this.byKey.set(key, ref);
-      this.byRef.set(ref, key);
-      return ref;
-    }
-    throw new Error(
-      `DCP message alias capacity exceeded. Cannot allocate more than ${formatMessageRef(MESSAGE_REF_MAX_INDEX)} refs in one session.`,
-    );
-  }
-
-  /**
    * Drops the alias of each given key (unknown keys are a no-op). Pure map
    * surgery: it deliberately has NO effect on how the next alias is chosen.
    * Compression calls this for every covered key, and the next dispatch
@@ -150,10 +127,6 @@ export class RefRegistry {
 
   keyOf(ref: string): string | undefined {
     return this.byRef.get(ref);
-  }
-
-  refOf(key: string): string | undefined {
-    return this.byKey.get(key);
   }
 
   /**
@@ -179,8 +152,8 @@ export class RefRegistry {
       registry.byKey.set(key, ref);
       if (!registry.byRef.has(ref)) registry.byRef.set(ref, key);
     }
-    // `next` is re-derived rather than trusted: a stale (or corrupt) value
-    // could otherwise wedge `ensure` past the cap.
+    // `next` is re-derived rather than trusted: a stale (or corrupt) persisted
+    // value would otherwise misreport the high-water mark.
     registry.next = onePastHighest(registry.byRef.keys());
     return registry;
   }

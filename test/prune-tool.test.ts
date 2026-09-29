@@ -133,10 +133,57 @@ function summaryOfTokens(tokens: number): string {
   return "s".repeat(length);
 }
 
+test("prune resolves mNNNN boundaries against the dispatch's projected ref table", async () => {
+  // Every other test in this file also resolves against a projected table, but
+  // none of them assert the SHAPE of that table: they only prove the tool
+  // works. This pins the production contract the tool actually depends on - the
+  // context hook rebuilds the whole table from the visible keys on every
+  // dispatch (RefRegistry.project), so the boundary IDs the model was shown are
+  // dense from m0001 and strictly ascending in transcript order. A regression
+  // that reintroduced a session-long allocator would leave these tests passing
+  // against a table shape the plugin never builds.
+  const { store, index, run } = harness();
+  const runtime = await store.ensure(SESSION);
+  assert.equal(runtime.refs.project(index.keys), 0);
+  assert.deepEqual(
+    [...runtime.refs.byKey],
+    index.keys.map((key, i) => [key, `m${String(i + 1).padStart(4, "0")}`]),
+  );
+
+  // m0001..m0004 therefore name u1..a2 in transcript order, and the tool
+  // resolves each boundary back through `byRef` into those keys.
+  const result = await run({
+    topic: "Projection",
+    content: [{ startId: "m0001", endId: "m0004", summary: "Explored the auth system." }],
+  });
+  assert.equal(String(result.content), "Pruned 5 message(s) into 1 pruned section(s) (b1).");
+  assert.deepEqual(runtime.state.blocks["1"]!.coveredKeys, [
+    "id:u1",
+    "id:a1",
+    "id:t1",
+    "id:a2",
+    "id:t2",
+  ]);
+
+  // Boundaries resolve strictly through the projection: one the table never
+  // had, and one the compression just released (the intra-dispatch window
+  // `applyCompression`'s `refs.release` guards - a second `prune` in the same
+  // assistant message must fail loudly, not re-cover an already-covered key).
+  for (const boundary of [`m${String(index.keys.length + 1).padStart(4, "0")}`, "m0005"]) {
+    await assert.rejects(
+      run({
+        topic: "Unresolvable",
+        content: [{ startId: boundary, endId: "m0006", summary: "nope" }],
+      }),
+      new RegExp(`startId ${boundary} does not exist in the current context`),
+    );
+  }
+});
+
 test("prune records a block covering the selected range", async () => {
   const { store, index, run, compressions } = harness();
   const runtime = await store.ensure(SESSION);
-  for (const key of index.keys) runtime.refs.ensure(key);
+  runtime.refs.project(index.keys);
 
   const result = await run({
     topic: "Auth exploration",
@@ -172,7 +219,7 @@ test("prune records a block covering the selected range", async () => {
 test("prune consumes intersected blocks and expands their placeholders", async () => {
   const { store, index, run, compressions } = harness();
   const runtime = await store.ensure(SESSION);
-  for (const key of index.keys) runtime.refs.ensure(key);
+  runtime.refs.project(index.keys);
 
   await run({
     topic: "First pass",
@@ -219,7 +266,7 @@ test("prune consumes intersected blocks and expands their placeholders", async (
 test("prune drops a consumed block whose placeholder is omitted", async () => {
   const { store, index, run } = harness();
   const runtime = await store.ensure(SESSION);
-  for (const key of index.keys) runtime.refs.ensure(key);
+  runtime.refs.project(index.keys);
 
   await run({
     topic: "First pass",
@@ -250,7 +297,7 @@ test("prune drops a consumed block whose placeholder is omitted", async () => {
 test("prune rejects a zero-gain re-prune without touching state", async () => {
   const { store, index, run, compressions } = harness();
   const runtime = await store.ensure(SESSION);
-  for (const key of index.keys) runtime.refs.ensure(key);
+  runtime.refs.project(index.keys);
 
   await run({
     topic: "First pass",
@@ -308,7 +355,7 @@ test("a successful prune returns a normal result shape, not an error payload", a
   // Nothing on the happy path may carry that shape any more.
   const { store, index, run } = harness();
   const runtime = await store.ensure(SESSION);
-  for (const key of index.keys) runtime.refs.ensure(key);
+  runtime.refs.project(index.keys);
   const result = await run({
     topic: "Shape",
     content: [{ startId: "m0001", endId: "m0004", summary: "Explored the auth system." }],
@@ -325,7 +372,7 @@ test("a successful prune returns a normal result shape, not an error payload", a
 test("prune records an honest re-summarize when the fold clears the floor", async () => {
   const { store, index, run, compressions } = harness();
   const runtime = await store.ensure(SESSION);
-  for (const key of index.keys) runtime.refs.ensure(key);
+  runtime.refs.project(index.keys);
 
   // ~610 chars -> a 170-token standing summary, so swapping it for a ~25-token
   // one-liner reclaims 145 tokens and clears the floor max(128, half of 170)
@@ -361,7 +408,7 @@ test("prune records an honest re-summarize when the fold clears the floor", asyn
 test("prune THROWS on overlapping ranges and unknown ids instead of returning them", async () => {
   const { store, index, run } = harness();
   const runtime = await store.ensure(SESSION);
-  for (const key of index.keys) runtime.refs.ensure(key);
+  runtime.refs.project(index.keys);
 
   // Expected failures are THROWN, never returned as model-visible success
   // content: the runner frames a thrown error as a real tool failure, while a
@@ -395,7 +442,7 @@ test("prune THROWS on overlapping ranges and unknown ids instead of returning th
 test("prune THROWS on an inverted range", async () => {
   const { store, index, run } = harness();
   const runtime = await store.ensure(SESSION);
-  for (const key of index.keys) runtime.refs.ensure(key);
+  runtime.refs.project(index.keys);
 
   // m0004 is a3, m0002 is a1: the model addressed the range backwards. This is
   // a defect in the call, not a result - it must not read as a completed prune.
@@ -415,7 +462,7 @@ test("prune THROWS on an inverted range", async () => {
 test("prune THROWS on an unknown block boundary id", async () => {
   const { store, index, run } = harness();
   const runtime = await store.ensure(SESSION);
-  for (const key of index.keys) runtime.refs.ensure(key);
+  runtime.refs.project(index.keys);
 
   await assert.rejects(
     run({
@@ -442,7 +489,7 @@ test("a bad (bN) placeholder in a later range aborts the whole prune atomically"
   const { storage, writes } = memoryStorage();
   const { store, index, run, compressions } = harness({}, fixture(), storage);
   const runtime = await store.ensure(SESSION);
-  for (const key of index.keys) runtime.refs.ensure(key);
+  runtime.refs.project(index.keys);
   // applyCompression clears the anchors and releases the covered refs, so
   // both surviving proves the first entry was never applied.
   runtime.state.nudgeAnchors = [7];
@@ -470,7 +517,7 @@ test("a bad (bN) placeholder in a later range aborts the whole prune atomically"
   assert.equal(state.pruneSeq, 0);
   assert.deepEqual(state.nudgeAnchors, [7]);
   // Refs of the would-be covered keys are still allocated (not released).
-  assert.equal(runtime.refs.refOf("id:u1"), "m0001");
+  assert.equal(runtime.refs.byKey.get("id:u1"), "m0001");
   assert.equal(runtime.refs.keyOf("m0004"), "id:a2");
   assert.equal(compressions.length, 0);
   // And nothing at all was persisted: a rejected call never writes state.
@@ -481,7 +528,7 @@ test("the zero-gain floor is half the standing summary, just under and just over
   const seed = async (standingTokens: number) => {
     const { store, index, run } = harness();
     const runtime = await store.ensure(SESSION);
-    for (const key of index.keys) runtime.refs.ensure(key);
+    runtime.refs.project(index.keys);
     await run({
       topic: "First pass",
       content: [{ startId: "m0001", endId: "m0004", summary: summaryOfTokens(standingTokens) }],
@@ -518,7 +565,7 @@ test("the zero-gain floor has an absolute minimum for small blocks", async () =>
   const seed = async (standingTokens: number) => {
     const { store, index, run } = harness();
     const runtime = await store.ensure(SESSION);
-    for (const key of index.keys) runtime.refs.ensure(key);
+    runtime.refs.project(index.keys);
     await run({
       topic: "First pass",
       content: [{ startId: "m0001", endId: "m0004", summary: summaryOfTokens(standingTokens) }],
@@ -578,7 +625,7 @@ test("prune reports malformed arguments and empty context as thrown failures", a
 test("prune clears pending nudge anchors on success", async () => {
   const { store, index, run } = harness();
   const runtime = await store.ensure(SESSION);
-  for (const key of index.keys) runtime.refs.ensure(key);
+  runtime.refs.project(index.keys);
   runtime.state.nudgeAnchors = [99];
 
   await run({
@@ -595,7 +642,7 @@ test("prune reports post-prune occupancy in its usage note", async () => {
   // transcript instead of telling the model the window is still near-full.
   const { store, index, run, compressions } = harness({ getUsageTokens: () => 150_000 });
   const runtime = await store.ensure(SESSION);
-  for (const key of index.keys) runtime.refs.ensure(key);
+  runtime.refs.project(index.keys);
 
   const result = await run({
     topic: "Note check",
@@ -630,7 +677,7 @@ test("prune persists the compression record in the session stats", async () => {
   // store for the card and report to keep showing it.
   const { store, index, run } = harness();
   const runtime = await store.ensure(SESSION);
-  for (const key of index.keys) runtime.refs.ensure(key);
+  runtime.refs.project(index.keys);
 
   const result = await run({
     topic: "History check",
@@ -690,7 +737,7 @@ function parallelFixture(): WireMessage[] {
 test("prune snaps the end boundary forward over a parallel sibling result", async () => {
   const { store, index, run } = harness({}, parallelFixture());
   const runtime = await store.ensure(SESSION);
-  for (const key of index.keys) runtime.refs.ensure(key);
+  runtime.refs.project(index.keys);
 
   // Range ends at assistant a1 whose two results (tool:c1, tool:c2) lie
   // outside it: without the forward snap the anchor would be a standalone tool
@@ -710,7 +757,7 @@ test("prune snaps the end boundary forward over a parallel sibling result", asyn
 test("prune snaps the start boundary back over the issuing assistant", async () => {
   const { store, index, run } = harness({}, parallelFixture());
   const runtime = await store.ensure(SESSION);
-  for (const key of index.keys) runtime.refs.ensure(key);
+  runtime.refs.project(index.keys);
 
   // Range starts at a tool result: the issuing assistant must be covered with
   // it, or it would be kept with dangling tool_calls.
@@ -729,7 +776,7 @@ test("prune snaps the start boundary back over the issuing assistant", async () 
 test("prune snaps both boundaries when the range starts mid-batch", async () => {
   const { store, index, run } = harness({}, parallelFixture());
   const runtime = await store.ensure(SESSION);
-  for (const key of index.keys) runtime.refs.ensure(key);
+  runtime.refs.project(index.keys);
 
   // Range starts at the second of two parallel results and ends at an
   // assistant whose result follows: the backward snap must absorb the whole

@@ -67,11 +67,10 @@ test("hydrateSessionState caps the compression history", () => {
 test("applyCompression releases refs for covered keys and consumed blocks", () => {
   const state = createSessionState("s");
   const refs = new RefRegistry();
-  refs.ensure("msg:1");
-  refs.ensure("msg:2");
-  refs.ensure("msg:3");
-  refs.ensure("msg:4");
-  refs.ensure("msg:5");
+  // Production shape: the context hook projects the visible transcript's dense,
+  // ascending mNNNN aliases on every dispatch (RefRegistry.project), so msg:1
+  // is m0001 and msg:5 is m0005.
+  refs.project(["msg:1", "msg:2", "msg:3", "msg:4", "msg:5"]);
 
   // First compression covers msg:1 and msg:2; their refs are released.
   applyCompression({
@@ -85,11 +84,11 @@ test("applyCompression releases refs for covered keys and consumed blocks", () =
     consumedBlockIds: [],
     anchorKey: "tail",
   });
-  assert.equal(refs.refOf("msg:1"), undefined);
-  assert.equal(refs.refOf("msg:2"), undefined);
-  assert.equal(refs.refOf("msg:3"), "m0003");
-  assert.equal(refs.refOf("msg:4"), "m0004");
-  assert.equal(refs.refOf("msg:5"), "m0005");
+  assert.equal(refs.byKey.get("msg:1"), undefined);
+  assert.equal(refs.byKey.get("msg:2"), undefined);
+  assert.equal(refs.byKey.get("msg:3"), "m0003");
+  assert.equal(refs.byKey.get("msg:4"), "m0004");
+  assert.equal(refs.byKey.get("msg:5"), "m0005");
 
   // Second compression consumes block 1 and covers msg:3. Consumed block 1's
   // covered keys fold in, so msg:1-3 are all released.
@@ -104,13 +103,19 @@ test("applyCompression releases refs for covered keys and consumed blocks", () =
     consumedBlockIds: [1],
     anchorKey: "tail",
   });
-  assert.equal(refs.refOf("msg:1"), undefined);
-  assert.equal(refs.refOf("msg:2"), undefined);
-  assert.equal(refs.refOf("msg:3"), undefined);
+  assert.equal(refs.byKey.get("msg:1"), undefined);
+  assert.equal(refs.byKey.get("msg:2"), undefined);
+  assert.equal(refs.byKey.get("msg:3"), undefined);
   // Live keys keep their refs.
-  assert.equal(refs.refOf("msg:4"), "m0004");
-  assert.equal(refs.refOf("msg:5"), "m0005");
+  assert.equal(refs.byKey.get("msg:4"), "m0004");
+  assert.equal(refs.byKey.get("msg:5"), "m0005");
 
-  // Released slots are reused by the next allocation.
-  assert.equal(refs.ensure("msg:6"), "m0001");
+  // The release is a map drop, not a renumber: the freed slots are only
+  // reclaimed by the next dispatch's projection, which is what keeps the
+  // surviving mNNNN ascending. (A second `prune` in the same dispatch must NOT
+  // be able to re-resolve m0001..m0003 - the table above proves it cannot.)
+  assert.deepEqual([...refs.byKey], [
+    ["msg:4", "m0004"],
+    ["msg:5", "m0005"],
+  ]);
 });
