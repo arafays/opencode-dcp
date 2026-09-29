@@ -4,6 +4,8 @@ import {
   contextUsage,
   FALLBACK_CONTEXT_WINDOW,
   tokenLabel,
+  ZERO_GAIN_MIN_TOKENS,
+  ZERO_GAIN_STANDING_SUMMARY_FRACTION,
 } from "./constants";
 import type { Logger } from "./logger";
 import { PRUNE_RANGE } from "./prompts";
@@ -36,22 +38,12 @@ import { MAX_RECENT_COMPRESSIONS, type CompressionEventRecord } from "./tui-brid
 export const PRUNE_TOOL_NAME = "prune";
 
 /**
- * Floor for a zero-gain re-summarize: the reclaim must clear
- * `max(ZERO_GAIN_MIN_TOKENS, ZERO_GAIN_STANDING_SUMMARY_FRACTION of the
- * standing summary)` tokens, else the whole call is rejected before any state
- * mutation.
- *
- * The fraction is the "substantially shorter" rule the model copy states:
- * freeing more than half of the consumed summaries means the replacement is
- * at most half their size, i.e. a real condensation rather than a rephrase.
- * The absolute minimum exists because such a pass costs a whole model turn -
- * reasoning, the tool call and its result all sit in the window - so a fold
- * that frees tens of tokens is a net loss. The previous floor
- * (`max(32, 1/4)`) let 208- and 352-token rewrites through in production
- * (3 of 15 accepted prunes), each followed by a fresh pressure nudge.
+ * The zero-gain floor (`ZERO_GAIN_MIN_TOKENS`,
+ * `ZERO_GAIN_STANDING_SUMMARY_FRACTION`) is declared in `lib/constants.ts` so
+ * the enforcement here and the sentence describing it in `PRUNE_RANGE`
+ * (`lib/prompts.ts`) read one number. Re-exported for the existing importers.
  */
-export const ZERO_GAIN_MIN_TOKENS = 128;
-const ZERO_GAIN_STANDING_SUMMARY_FRACTION = 0.5;
+export { ZERO_GAIN_MIN_TOKENS, ZERO_GAIN_STANDING_SUMMARY_FRACTION };
 
 export interface PruneRangeEntry {
   startId: string;

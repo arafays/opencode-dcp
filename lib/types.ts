@@ -20,12 +20,43 @@ export interface TextPart {
   text: string;
 }
 
+/**
+ * Inline media. Mirrors `@opencode/ai`'s `MediaPart` (packages/ai/src/schema/
+ * messages.ts), which nests the payload under a `Media.Asset` rather than
+ * flattening `mediaType`/`data` onto the part - the flattened shape is NOT what
+ * the hook receives. `measurePartChars` walks `MediaPart -> Asset -> Source`
+ * and charges the allowance at the `Source` that owns the bytes, so a wrapper
+ * with extra fields still prices correctly.
+ */
 export interface MediaPart {
   type: "media";
-  mediaType: string;
-  data: string | Uint8Array;
+  media: MediaAsset;
   filename?: string;
+  cache?: unknown;
+  metadata?: Record<string, unknown>;
+  providerMetadata?: unknown;
 }
+
+export interface MediaAsset {
+  /** The payload lives here, never inline on the asset. */
+  source: MediaSource;
+  /** Declared type, sniffed magic bytes, then `application/octet-stream`. */
+  mediaType: string;
+  kind?: string;
+  info?: unknown;
+  expiresAt?: number;
+  providerMetadata?: unknown;
+  headers?: Record<string, string>;
+}
+
+/** Tagged union (packages/ai/src/media.ts): the variant owns the bytes. */
+export type MediaSource =
+  | { type: "bytes"; data: Uint8Array; mediaType: string }
+  | { type: "base64"; data: string; mediaType: string }
+  /** A handle the provider still materializes; costs a flat allowance. */
+  | { type: "url"; url: string; mediaType?: string; expiresAt?: number }
+  /** Provider-side handle: OpenAI `file_id`, Gemini file URI, `gs://`, ... */
+  | { type: "ref"; provider: string; id: string; mediaType?: string };
 
 /** Assistant-declared tool invocation. */
 export interface ToolCallPart {

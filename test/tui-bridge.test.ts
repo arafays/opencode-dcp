@@ -414,6 +414,24 @@ test("the same image is charged once through every wire shape that carries it", 
   assert.ok(viaBareString > 1_000_000, `bare base64 is text, got ${viaBareString}`);
 });
 
+test("a raw typed array is not walked per byte", () => {
+  // `Object.values` over a 4MB Uint8Array allocates an entry per byte, and this
+  // runs on EVERY dispatch. Measured 721.3ms -> 0.2ms for one such array; the
+  // budget below is loose enough not to be flaky but far under the unguarded
+  // cost, so deleting the ArrayBuffer.isView guard fails here.
+  const messages = [
+    { role: "user" as const, content: [new Uint8Array(4_000_000)] },
+  ];
+  const started = performance.now();
+  const chars = measureMessagesChars(messages);
+  const elapsed = performance.now() - started;
+
+  // A typed array is raw bytes, not characters: it has no character cost of
+  // its own (the owning media node already charged the allowance).
+  assert.equal(chars, 4, "only the four measured scalar fields should count");
+  assert.ok(elapsed < 50, `4MB typed array walk took ${elapsed.toFixed(1)}ms`);
+});
+
 test("text alongside a large image still dominates and stays at 4 chars/token", () => {
   const image = `data:image/png;base64,${"A".repeat(4_028_662)}`;
   const TEXT_CHARS = 40_000; // 10,000 tokens

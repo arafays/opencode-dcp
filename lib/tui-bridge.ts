@@ -239,7 +239,9 @@ function measureObjectChars(record: Record<string, unknown>): number {
   // (`MediaPart` -> `Media.Asset` -> `Media.Source`) walk normally and never
   // double-charge on the way down.
   if (type === "media" && record["data"] !== undefined) {
-    // Flattened form from lib/types.ts: `{ type, mediaType, data }`.
+    // Legacy flattened form `{ type, mediaType, data }`. NOT the current wire
+    // shape (see `MediaPart` in lib/types.ts, which nests `media.source`) -
+    // kept because transcripts persisted by older builds still carry it.
     const kind = mediaKindOf(asString(record["mediaType"]));
     return mediaAllowanceChars(kind) + measureFields(record, "data");
   }

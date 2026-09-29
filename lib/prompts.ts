@@ -3,7 +3,7 @@
  * semantics (wire messages instead of stored parts).
  */
 
-import { budgetClause, contextUsage } from "./constants"
+import { budgetClause, contextUsage, ZERO_GAIN_MIN_TOKENS, ZERO_GAIN_STANDING_SUMMARY_FRACTION } from "./constants"
 
 export const SYSTEM = `
 You manage your own context window. Your only context-management tool is \`prune\`: it replaces older conversation ranges with summaries you write, freeing tokens.
@@ -24,13 +24,14 @@ Keep decisions, file paths, signatures, constraints, findings, and current task 
 
 BOUNDARY IDS
 Each range is { startId, endId, summary }. Use IDs from <dcp-message-id> tags: mNNNN = raw messages, bN = previously pruned blocks. IDs must exist in context; startId must come before endId. Batch independent non-overlapping ranges as separate entries in one call's content array.
+mNNNN tags are renumbered every dispatch: they are dense from m0001 and strictly ascending in transcript order, so a lower number is ALWAYS an earlier message. A range spanning the whole transcript is fine - m0001 to the last ID - and is usually the cheapest way to clear old work.
 
 PREVIOUSLY PRUNED BLOCKS
 A range may cover pruned block summaries (marked [Compressed conversation section] with a bN ID):
 - Include \`(bN)\` exactly once in the summary to carry that block's full content forward; write surrounding text so it still reads after expansion.
 - Omit \`(bN)\` to permanently drop that block's content. Do this when the work it describes no longer matters to the current task.
 - Never emit \`(bN)\` text outside a placeholder; mention blocks in prose as plain text like \`pruned bN\`.
-- A range covering ONLY already-compressed messages is rejected unless the replacement summary is at most half the standing summary AND frees at least 128 tokens: a same-size re-summarization is a no-op that costs a whole model turn. Prune uncovered messages instead, or fold/drop a block only with a substantially shorter summary.
+- A range covering ONLY already-compressed messages is rejected unless the replacement summary is at most ${(ZERO_GAIN_STANDING_SUMMARY_FRACTION * 100).toFixed(0)}% the size of the standing summary AND frees at least ${ZERO_GAIN_MIN_TOKENS} tokens: a same-size re-summarization is a no-op that costs a whole model turn. Prune uncovered messages instead, or fold/drop a block only with a substantially shorter summary.
 
 OUTPUT FORMAT
 Call with topic (3-5 word label) and content: [{ startId, endId, summary }, ...].

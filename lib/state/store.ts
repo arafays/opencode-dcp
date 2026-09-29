@@ -135,9 +135,19 @@ export function applyCompression(input: {
     // Covered keys of consumed blocks stay covered through the new block.
   }
 
-  // Ref slots for every newly-covered key are freed: the new block's own
+  // Drop the boundary-ID alias of every newly-covered key: the new block's own
   // coverage plus everything the consumed blocks covered (their coverage just
   // folded into this block). Persisted block.coveredKeys arrays stay intact.
+  //
+  // Since refs became a per-dispatch projection (`RefRegistry.project`, called
+  // by the context hook), the next dispatch would rebuild the table from the
+  // visible keys anyway - this is not capacity reclaim. It is the guard for
+  // the window BETWEEN a prune and that rebuild: a model may emit several
+  // tool calls in one assistant message, so a second `prune` in the same
+  // dispatch can run against aliases the first one just covered. Without the
+  // drop, `byRef` would still resolve a covered key and the second call would
+  // re-cover it instead of failing loudly. Refs are recomputed wholesale each
+  // dispatch, so renumbering these keys is safe.
   const releasedKeys = [
     ...input.coveredKeys,
     ...input.consumedBlockIds.flatMap((id) => {
