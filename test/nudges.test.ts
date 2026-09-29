@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import { resolveLimit, resolveOptions } from "../lib/config";
 import { UsageTracker, maybeContextNudge, maybeIterationNudge, maybePruneAck, usageTotal } from "../lib/nudges";
+import { CONTEXT_LIMIT_NUDGE } from "../lib/prompts";
 
 const CONFIG = resolveOptions(undefined, () => {});
 
@@ -223,7 +224,10 @@ test("post-prune ack fires once, resolves the old reminder, and re-seeds the rat
   state.pruneSeq = 1;
   const ack = dispatch(12, 60_000, "b7");
   assert.match(ack ?? "", /Prune applied \(b7\)/);
-  assert.match(ack ?? "", /60,000 tokens: 43% of the 140,000-token pruning budget/);
+  assert.match(
+    ack ?? "",
+    /60,000 tokens: 30% of the 200,000-token model window\. The 140,000-token pruning budget is not reached/,
+  );
   assert.match(ack ?? "", /No further pruning needed/);
   assert.ok(!ack?.includes("call `prune` on it"), "ack must not re-request a prune");
   assert.equal(state.pruneAckSeq, 1);
@@ -239,7 +243,7 @@ test("post-prune ack fires once, resolves the old reminder, and re-seeds the rat
   const over = dispatch(14, 160_000);
   assert.match(
     over ?? "",
-    /160,000 tokens: 114% of the 140,000-token pruning budget \(~80% of the 200,000-token model window\)/,
+    /160,000 tokens: 80% of the 200,000-token model window and above the 140,000-token pruning budget/,
   );
   assert.match(over ?? "", /Still above the pruning budget/);
   assert.deepEqual(state.nudgeAnchors, [12, 14]);
@@ -280,4 +284,306 @@ test("post-prune ack calls out a zero-message re-summarize while over budget", (
   state.pruneSeq = 4;
   const under = dispatch(60_000, 0);
   assert.match(under ?? "", /No further pruning needed/);
+});
+
+// -- pressure copy: window-first, no panic-inducing percentages ---------------
+//
+// Production defect these lock down: every pressure message led with a
+// percentage of the PLUGIN-INTERNAL pruning budget ("999% of the 150,000-token
+// pruning budget (~166% of the 1,048,576-token model window)"), and the model
+// read the headline as an emergency - "the context is at 493k tokens, way over.
+// I MUST prune", "the reminder says 999% of pruning budget... That's critical",
+// "Context is 165% / 167% / 168% of the model window" - and reported the
+// measurements as inconsistent when the prune tool said "under budget".
+
+/** Every "N% of the ... model window" percentage in a message, as numbers. */
+const windowPercents = (text: string) =>
+  [...text.matchAll(/(\d+)% of the [\d,]+-token model window/g)].map((m) => Number(m[1]));
+
+/** The token label + window-share clause the message leads its measurement with. */
+const leadingClause = (text: string) =>
+  /~[\d,]+ tokens: [^.]*model window[^.]*\./.exec(text)?.[0] ?? "";
+
+/** The measurement clause with the nudge's own call to action stripped. */
+const measurement = (text: string) => leadingClause(text).replace(/ - prune now\.$/, ".");
+
+test("nudge and ack lead with the model window, never a budget percentage", () => {
+  // Absolute 150,000 budget against the real 1,048,576 window - the exact
+  // configuration that produced "999% of the pruning budget" in production.
+  const config = resolveOptions({ maxContextLimit: 150_000 }, () => {});
+  const state = { nudgeAnchors: [] as number[], pruneSeq: 0, pruneAckSeq: 0 };
+  const usageTokens = 780_000; // 74% of the window, 5x the budget.
+  const window = 1_048_576;
+
+  const nudge = maybeContextNudge({
+    state,
+    config,
+    usageTokens,
+    modelContextLimit: window,
+    messageCount: 1,
+  });
+  assert.ok(nudge, "780k is well over the 150k budget, so the nudge must arm");
+
+  state.pruneSeq = 1;
+  const ack = maybePruneAck({
+    state,
+    config,
+    usageTokens,
+    modelContextLimit: window,
+    messageCount: 2,
+  });
+  assert.ok(ack, "a completed prune must be acknowledged once");
+
+  for (const [label, text] of [
+    ["nudge", nudge],
+    ["ack", ack],
+  ] as const) {
+    // The LEADING measurement names the window, not the budget: 780k/1,048,576
+    // = 74%, and the 150k budget is a secondary plain threshold. The old copy
+    // led with "520% of the 150,000-token pruning budget" here.
+    assert.match(
+      text,
+      /~780,000 tokens: 74% of the 1,048,576-token model window and above the 150,000-token pruning budget/,
+      label,
+    );
+    assert.ok(
+      text.indexOf("model window") < text.indexOf("pruning budget"),
+      `${label} must name the window before the budget: ${text}`,
+    );
+    // No budget percentage anywhere: not even parenthetically.
+    assert.ok(
+      !/\d+% of the [\d,]+-token pruning budget/.test(text),
+      `${label} must not print a percentage of the budget: ${text}`,
+    );
+    // The window share is the real ratio - never a 999% / 168% style figure.
+    assert.deepEqual(windowPercents(text), [74], label);
+  }
+
+  // Both messages use the SAME number format for the same inputs. (The nudge
+  // appends its own call to action; the ack resolves the reminder and states
+  // whether another pass is warranted - the NUMBERS must be identical.)
+  assert.equal(measurement(nudge), measurement(ack));
+  assert.equal(
+    measurement(nudge),
+    "~780,000 tokens: 74% of the 1,048,576-token model window and above the 150,000-token pruning budget.",
+  );
+});
+
+test("a measurement above the window says the window is exceeded, not 168%", () => {
+  const state = { nudgeAnchors: [] as number[], pruneSeq: 0, pruneAckSeq: 0 };
+  // The real transcript case: 1,498,500 tokens against a 1,048,576 window,
+  // which the old copy rendered as "999% of the 150,000-token pruning budget
+  // (~166% of the 1,048,576-token model window)".
+  const config = resolveOptions({ maxContextLimit: 150_000 }, () => {});
+  const usageTokens = 1_498_500;
+  const window = 1_048_576;
+
+  const nudge = maybeContextNudge({
+    state,
+    config,
+    usageTokens,
+    modelContextLimit: window,
+    messageCount: 1,
+  });
+  assert.ok(nudge);
+  state.pruneSeq = 1;
+  const ack = maybePruneAck({
+    state,
+    config,
+    usageTokens,
+    modelContextLimit: window,
+    messageCount: 2,
+  });
+  assert.ok(ack);
+
+  for (const [label, text] of [
+    ["nudge", nudge],
+    ["ack", ack],
+  ] as const) {
+    assert.match(
+      text,
+      /~1,498,500 tokens: this is over the 1,048,576-token model window/,
+      label,
+    );
+    // No percentage of the window is emitted at all once the ratio exceeds
+    // 100%: "142% of the model window" is exactly the unreadable figure to
+    // avoid, and the model quoted it back as an emergency.
+    assert.deepEqual(windowPercents(text), [], label);
+    assert.ok(
+      !/\b1[0-9]{2}%/.test(text),
+      `${label} must not print an over-100% window ratio: ${text}`,
+    );
+    // The over-estimate is labelled as one, so the model trusts the number
+    // instead of concluding the measurements are inconsistent.
+    assert.match(text, /\(an over-estimate - the window is full\)/, label);
+    // The budget is still named as a plain threshold (never a percentage), and
+    // the ask is unchanged: the nudge orders the prune, the ack states whether
+    // another pass is warranted.
+    assert.match(text, /and above the 150,000-token pruning budget\b/, label);
+  }
+  assert.match(nudge, /and above the 150,000-token pruning budget - prune now\./);
+  assert.match(ack, /Still above the pruning budget/);
+
+  // Just past the window (rounds to 100%) still reads as exceeded, not 100%.
+  const justOver = maybeContextNudge({
+    state: { nudgeAnchors: [] },
+    config: CONFIG,
+    usageTokens: 100_001,
+    modelContextLimit: 100_000,
+    messageCount: 1,
+  });
+  assert.match(justOver ?? "", /this is over the 100,000-token model window/);
+  assert.deepEqual(windowPercents(justOver ?? ""), []);
+
+  // Exactly at the window is a legitimate 100%.
+  const atWindow = maybeContextNudge({
+    state: { nudgeAnchors: [] },
+    config: CONFIG,
+    usageTokens: 100_000,
+    modelContextLimit: 100_000,
+    messageCount: 1,
+  });
+  assert.match(atWindow ?? "", /100,000 tokens: 100% of the 100,000-token model window/);
+});
+
+test("the budget is named as a plain threshold in both directions", () => {
+  const window = 200_000; // 70% budget = 140,000.
+
+  // Under budget: the ack says the budget is not reached - never "43% of the
+  // 140,000-token pruning budget" followed by a prune request.
+  const state = { nudgeAnchors: [] as number[], pruneSeq: 1, pruneAckSeq: 0 };
+  const under = maybePruneAck({
+    state,
+    config: CONFIG,
+    usageTokens: 60_000,
+    modelContextLimit: window,
+    messageCount: 5,
+  });
+  assert.match(
+    under ?? "",
+    /~60,000 tokens: 30% of the 200,000-token model window\. The 140,000-token pruning budget is not reached\./,
+  );
+  assert.match(under ?? "", /No further pruning needed/);
+
+  // Over budget: both denominators stated plainly, window first.
+  state.pruneSeq = 2;
+  const over = maybePruneAck({
+    state,
+    config: CONFIG,
+    usageTokens: 140_000,
+    modelContextLimit: window,
+    messageCount: 6,
+    messagesCovered: 3,
+  });
+  assert.match(
+    over ?? "",
+    /~140,000 tokens: 70% of the 200,000-token model window and above the 140,000-token pruning budget/,
+  );
+  assert.match(over ?? "", /Still above the pruning budget/);
+});
+
+test("the nudge's own verdict never contradicts its budget clause", () => {
+  // Exported directly, below budget: the clause and the trailing verdict must
+  // agree. (The gate in maybeContextNudge never renders this, but the two
+  // sentences are built from the same comparison, so they cannot disagree.)
+  const under = CONTEXT_LIMIT_NUDGE(125_000, 150_000, 1_048_576);
+  assert.match(
+    under,
+    /~125,000 tokens: 12% of the 1,048,576-token model window\. The 150,000-token pruning budget is not reached - no pruning needed\./,
+  );
+  assert.ok(!under.includes("prune now"), under);
+
+  // At budget it is the other branch, and the wording is the target shape.
+  const at = CONTEXT_LIMIT_NUDGE(150_000, 150_000, 1_048_576);
+  assert.match(
+    at,
+    /~150,000 tokens: 14% of the 1,048,576-token model window and above the 150,000-token pruning budget - prune now\./,
+  );
+});
+
+test("below-budget usage still returns undefined (the gate is unchanged)", () => {
+  const state = { nudgeAnchors: [] as number[] };
+  // 60,000 tokens is 30% of the 200,000 window and well under the 140,000
+  // budget: no reminder, and no anchor consumed.
+  assert.equal(
+    maybeContextNudge({
+      state,
+      config: CONFIG,
+      usageTokens: 60_000,
+      modelContextLimit: 200_000,
+      messageCount: 1,
+    }),
+    undefined,
+  );
+  assert.deepEqual(state.nudgeAnchors, []);
+
+  // One token under the budget is still silent; the nudge is >= the budget.
+  assert.equal(
+    maybeContextNudge({
+      state,
+      config: CONFIG,
+      usageTokens: 139_999,
+      modelContextLimit: 200_000,
+      messageCount: 2,
+    }),
+    undefined,
+  );
+  assert.deepEqual(state.nudgeAnchors, []);
+
+  // And at the budget it fires - the boundary is unchanged.
+  assert.ok(
+    maybeContextNudge({
+      state,
+      config: CONFIG,
+      usageTokens: 140_000,
+      modelContextLimit: 200_000,
+      messageCount: 3,
+    }),
+  );
+  assert.deepEqual(state.nudgeAnchors, [3]);
+
+  // An unknown window (0) still suppresses everything.
+  assert.equal(
+    maybeContextNudge({
+      state: { nudgeAnchors: [] },
+      config: CONFIG,
+      usageTokens: 500,
+      modelContextLimit: 0,
+      messageCount: 1,
+    }),
+    undefined,
+  );
+});
+
+test("an absolute budget above the window still resolves a defined window phrase", () => {
+  // maxContextLimit as an absolute token count LARGER than the catalog window
+  // (a misconfiguration, but one that must not produce unreadable copy): the
+  // measurement exceeds the window, so the window clause takes the plain-words
+  // branch and the budget is still named as a plain threshold.
+  const loose = resolveOptions({ maxContextLimit: 500_000 }, () => {});
+  const text = maybeContextNudge({
+    state: { nudgeAnchors: [] },
+    config: loose,
+    usageTokens: 600_000,
+    modelContextLimit: 200_000,
+    messageCount: 1,
+  });
+  assert.match(text ?? "", /600,000 tokens: this is over the 200,000-token model window/);
+  assert.match(text ?? "", /above the 500,000-token pruning budget - prune now\./);
+  assert.deepEqual(windowPercents(text ?? ""), []);
+
+  // Budget equal to the window: the model window is the only denominator, and
+  // it is still named in the leading clause (at 200,000 it is exactly full).
+  const equal = resolveOptions({ maxContextLimit: 200_000 }, () => {});
+  const atBudget = maybeContextNudge({
+    state: { nudgeAnchors: [] },
+    config: equal,
+    usageTokens: 200_000,
+    modelContextLimit: 200_000,
+    messageCount: 1,
+  });
+  assert.match(
+    atBudget ?? "",
+    /200,000 tokens: 100% of the 200,000-token model window and above the 200,000-token pruning budget/,
+  );
 });

@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  MESSAGE_REF_MAX_INDEX,
   RefRegistry,
   formatBlockRef,
   formatMessageIdTag,
   formatMessageRef,
   parseBlockRef,
   parseMessageRef,
+  type RefRegistryJson,
 } from "../lib/refs";
 
 test("formatMessageRef pads to four digits and rejects out-of-range indices", () => {
@@ -97,15 +99,225 @@ test("RefRegistry.release frees slots for reuse and ignores unknown keys", () =>
   assert.equal(registry.ensure("key:e"), "m0001");
 });
 
-test("RefRegistry.release rewinds next to the lowest freed slot", () => {
+test("RefRegistry.release frees the alias without rewinding the allocator", () => {
   const registry = new RefRegistry();
   registry.ensure("k1"); // m0001
   registry.ensure("k2"); // m0002
   registry.ensure("k3"); // m0003
-  // Freeing m0001 and m0003 rewinds next below the current high-water mark.
+
+  // Freeing m0001 and m0003 drops both directions of the alias and leaves the
+  // allocator untouched. `release` used to rewind `next` to the LOWEST free
+  // slot, which is what let the next new message be numbered below messages
+  // that were still visible to the model.
   registry.release(["k1", "k3"]);
-  assert.equal(registry.next, 1);
+  assert.equal(registry.refOf("k1"), undefined);
+  assert.equal(registry.keyOf("m0003"), undefined);
+  assert.equal(registry.refOf("k2"), "m0002");
+  assert.equal(registry.next, 4);
+
+  // The legacy single-key allocator still reuses a freed slot...
   assert.equal(registry.ensure("k4"), "m0001");
-  // m0002 is still taken, so the next free slot is m0003.
-  assert.equal(registry.ensure("k5"), "m0003");
+  // ...but the next dispatch's projection is what restores the ordering.
+  registry.project(["k2", "k4"]);
+  assert.equal(registry.refOf("k2"), "m0001");
+  assert.equal(registry.refOf("k4"), "m0002");
 });
+
+// -- per-dispatch projection --------------------------------------------------
+
+/** `mNNNN` for a 1-based index. */
+function ref(index: number): string {
+  return `m${String(index).padStart(4, "0")}`;
+}
+
+/**
+ * Asserts the dispatch invariant for a linearly ordered list of visible keys:
+ * every key is aliased, the refs are dense from m0001 and strictly ascending
+ * in transcript order, and each ref resolves back to its own key.
+ */
+function assertProjected(registry: RefRegistry, keys: string[]): string[] {
+  const refs = keys.map((key) => registry.refOf(key)!);
+  for (const [i, key] of keys.entries()) {
+    assert.equal(refs[i], ref(i + 1), `${key} must be aliased ${ref(i + 1)}`);
+    assert.equal(registry.keyOf(refs[i]!), key, `${refs[i]} must resolve back to ${key}`);
+  }
+  return refs;
+}
+
+test("project numbers the visible transcript densely from m0001, in order", () => {
+  const registry = new RefRegistry();
+  // A pre-existing (possibly inverted) table is replaced wholesale.
+  registry.ensure("stale");
+  assert.equal(registry.project(["a", "b", "c"]), 0);
+  assert.deepEqual([...registry.byKey], [["a", "m0001"], ["b", "m0002"], ["c", "m0003"]]);
+  assert.deepEqual([...registry.byRef], [["m0001", "a"], ["m0002", "b"], ["m0003", "c"]]);
+  assert.equal(registry.refOf("stale"), undefined);
+  assert.equal(registry.next, 4);
+
+  // Re-projecting the same keys is a no-op (tags stay byte-identical between
+  // dispatches that only append).
+  assert.equal(registry.project(["a", "b", "c"]), 0);
+  assertProjected(registry, ["a", "b", "c"]);
+
+  // A repeated key keeps its FIRST position instead of claiming a second slot
+  // (which would emit two conflicting tags for one message).
+  assert.equal(registry.project(["a", "b", "a", "c"]), 0);
+  assertProjected(registry, ["a", "b", "c"]);
+});
+
+test("projections interleaved with releases stay dense and ascending", () => {
+  const registry = new RefRegistry();
+  const covered = new Set<string>();
+  const transcript: string[] = [];
+  const visible = () => transcript.filter((key) => !covered.has(key));
+  /** One dispatch: new messages arrive, the visible set is projected, then an
+   *  optional compression covers the oldest N of them. */
+  const dispatch = (newMessages: number, cover: number) => {
+    for (let i = 0; i < newMessages; i++) transcript.push(`msg:${transcript.length}`);
+    assert.equal(registry.project(visible()), 0);
+    assertProjected(registry, visible());
+    if (cover === 0) return;
+    const coveredNow = visible().slice(0, cover);
+    for (const key of coveredNow) covered.add(key);
+    registry.release(coveredNow);
+  };
+
+  dispatch(6, 3);
+  dispatch(4, 2);
+  dispatch(2, 0);
+  dispatch(5, 1);
+  // The dispatch after the last compression is what re-numbers the survivors.
+  dispatch(0, 0);
+
+  // The surviving tail is one unbroken ascending run...
+  const live = visible();
+  assert.ok(live.length > 8, "expected a transcript to survive the compressions");
+  assertProjected(registry, live);
+  // ...starting at m0001, never at a high-water mark left over from earlier.
+  assert.equal(registry.refOf(live[0]!), "m0001");
+  // Nothing covered is still addressable: the model must never see an alias
+  // for a message it cannot read.
+  for (const key of covered) assert.equal(registry.refOf(key), undefined);
+});
+
+// Production regression (beta-12). The session-long allocator handed a
+// compressed-away low slot to the next new message while the survivors kept
+// their high numbers, so the tags the model read were `... m0259, m0194,
+// m0196 ...`. It concluded "earlier-processed blocks have high numbers",
+// emitted inverted ranges (`m0006..m0129`, `m0021..m0020`), had 9 of 26
+// prune calls die, and stopped pruning entirely.
+test("the m0259 -> m0194 inversion cannot survive a dispatch projection", () => {
+  // The registry exactly as that session persisted it: 95 visible messages
+  // tagged m0071..m0259 (every other index - assistant messages consume a
+  // ref but are never tagged), then 33 messages that arrived after a
+  // compression freed the low slots and were handed m0194..m0258, with
+  // `next` rewound to 1 while 77 refs were still live.
+  const head = Array.from({ length: 95 }, (_, i) => `head:${i}`);
+  const tail = Array.from({ length: 33 }, (_, i) => `tail:${i}`);
+  const legacy: RefRegistryJson = { byKey: {}, byRef: {}, next: 1 };
+  for (const [i, key] of head.entries()) legacy.byKey[key] = ref(71 + i * 2);
+  for (const [i, key] of tail.entries()) legacy.byKey[key] = ref(194 + i * 2);
+  for (const [key, value] of Object.entries(legacy.byKey)) legacy.byRef[value] = key;
+
+  // Characterize the failure: ordered by transcript position, the legacy
+  // aliases invert at the junction.
+  const legacyOrder = [...head, ...tail].map((key) => legacy.byKey[key]!);
+  assert.deepEqual(legacyOrder.slice(92, 97), ["m0255", "m0257", "m0259", "m0194", "m0196"]);
+  let inversions = 0;
+  for (let i = 1; i < legacyOrder.length; i++) {
+    if (parseMessageRef(legacyOrder[i - 1]!)! >= parseMessageRef(legacyOrder[i]!)!) inversions += 1;
+  }
+  assert.equal(inversions, 1, "the legacy table must reproduce the reported inversion");
+
+  // A session resumed from that blob loads without throwing...
+  const registry = RefRegistry.from(legacy);
+  assert.equal(registry.keyOf("m0259"), "head:94");
+  assert.equal(registry.keyOf("m0194"), "tail:0");
+  // ...and the very next dispatch re-projects the visible transcript, which
+  // is dense, ascending, and resolvable key by key.
+  const visible = [...head, ...tail];
+  assert.equal(registry.project(visible), 0);
+  const refs = assertProjected(registry, visible);
+  assert.equal(refs.at(-1), ref(visible.length));
+});
+
+// The mechanism, isolated: the legacy `release` rewound `next` to the LOWEST
+// free slot, so allocating one key after a compression could hand a number
+// LOWER than a key that was still visible and earlier in the transcript.
+test("an interior release can no longer hand out a lower number than a live key", () => {
+  const registry = new RefRegistry();
+  const live = Array.from({ length: 259 }, (_, i) => `msg:${i}`);
+
+  // Dispatch 1: the whole transcript.
+  registry.project(live);
+  assert.equal(registry.refOf("msg:0"), "m0001");
+  assert.equal(registry.refOf("msg:258"), "m0259");
+
+  // A compression covers an INTERIOR range, holding m0194..m0258.
+  const covered = live.slice(193, 258);
+  registry.release(covered);
+  for (const key of covered) assert.equal(registry.refOf(key), undefined);
+
+  // The freed slots must not be rewound into. `next` is no longer an allocator
+  // input, so even the legacy `ensure` cannot hand a new key a number LOWER
+  // than one still live and earlier in the transcript.
+  const arriving = Array.from({ length: 20 }, (_, i) => `msg:new:${i}`);
+  for (const key of arriving) registry.ensure(key);
+  const lowestLive = Math.min(
+    ...live
+      .filter((key) => !covered.includes(key))
+      .map((key) => parseMessageRef(registry.refOf(key)!)!),
+  );
+  for (const key of arriving) {
+    assert.ok(
+      parseMessageRef(registry.refOf(key)!)! >= lowestLive,
+      `${key} must not be numbered below the lowest live address`,
+    );
+  }
+
+  // And the next dispatch, which is what the model actually reads, is a single
+  // unbroken ascending run.
+  const survivors = live.filter((key) => !covered.includes(key));
+  assert.equal(registry.project([...survivors, ...arriving]), 0);
+  assertProjected(registry, [...survivors, ...arriving]);
+});
+
+test("project clamps at the ref cap instead of throwing", () => {
+  const registry = new RefRegistry();
+  const keys = Array.from({ length: MESSAGE_REF_MAX_INDEX + 5 }, (_, i) => `msg:${i}`);
+  const unaliased = registry.project(keys);
+  assert.equal(unaliased, 5);
+  assert.equal(registry.refOf(keys[0]!), "m0001");
+  assert.equal(registry.refOf(keys[MESSAGE_REF_MAX_INDEX - 1]!), ref(MESSAGE_REF_MAX_INDEX));
+  // The overflow tail is unaddressable, never wrong: every emitted ref still
+  // resolves back to its own key.
+  for (let i = 0; i < MESSAGE_REF_MAX_INDEX; i++) {
+    assert.equal(registry.keyOf(ref(i + 1)), keys[i]!);
+  }
+  assert.equal(registry.refOf(keys[MESSAGE_REF_MAX_INDEX]!), undefined);
+});
+
+test("RefRegistry.from tolerates missing, partial and corrupt blobs", () => {
+  const empty = { byKey: {}, byRef: {}, next: 1 };
+  assert.doesNotThrow(() => RefRegistry.from(undefined));
+  assert.deepEqual(RefRegistry.from(undefined).toJSON(), empty);
+  assert.deepEqual(RefRegistry.from({} as never).toJSON(), empty);
+  assert.deepEqual(RefRegistry.from(null as never).toJSON(), empty);
+
+  // Structurally wrong shapes load as empty rather than throwing mid-dispatch.
+  for (const blob of ["nope", 7, [], { byKey: "x", byRef: 3 }] as never[]) {
+    assert.deepEqual(RefRegistry.from(blob).toJSON(), empty);
+  }
+
+  // A legacy blob survives the round trip, and `next` is re-derived from the
+  // live aliases rather than trusted (a rewound/stale value would wedge the
+  // allocator; a corrupt one could push it past the cap).
+  const registry = new RefRegistry();
+  registry.project(["a", "b", "c"]);
+  const restored = RefRegistry.from({ ...registry.toJSON(), next: 1 });
+  assert.equal(restored.refOf("c"), "m0003");
+  assert.equal(restored.next, 4);
+  assert.equal(restored.ensure("d"), "m0004");
+  assert.doesNotThrow(() => RefRegistry.from({ ...registry.toJSON(), next: "wat" } as never));
+});
+

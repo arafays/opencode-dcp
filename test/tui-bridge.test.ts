@@ -306,3 +306,289 @@ test("resolveTuiStateDirs creates missing tui dirs and tolerates absent roots", 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// --- media-aware measurement -------------------------------------------------
+//
+// Production evidence (session ses_f1263c7d3ffeEhiJ39nrwHNlPd): 14,368,764
+// base64 characters across 26 images. One dispatch carried a single
+// 4,028,684-char image that the old estimate priced at 1,007,200 "tokens"
+// (96% of a 1,048,576-token window) while the provider reported 119,300
+// tokens (11%) of real occupancy, driving a runaway prune loop.
+
+/** The `Tool.FileContent` shape the Read/MCP/codemode tools emit for images. */
+function fileContent(dataUrl: string): unknown {
+  return [
+    {
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          id: "call_1",
+          name: "read",
+          result: {
+            type: "content",
+            value: [
+              { type: "text", text: "Image read successfully" },
+              { type: "file", uri: dataUrl, mime: "image/png", name: "shot.png" },
+            ],
+          },
+        },
+      ],
+    },
+  ];
+}
+
+function tokensFor(messages: unknown): number {
+  return estimateTokens(measureMessagesChars(messages));
+}
+
+test("a 4MB inline image is charged a flat allowance, not chars/4", () => {
+  // The exact production size, and the shape it arrived in.
+  const production = `data:image/png;base64,${"A".repeat(4_028_662)}`;
+  assert.equal(production.length, 4_028_684);
+
+  // 1,600 tokens = Anthropic's (1568*1568)/750 for their documented maximum
+  // image, rounded up. The band absorbs the ~30 structural characters of the
+  // surrounding tool-result wrapper.
+  const tokens = tokensFor(fileContent(production));
+  assert.ok(tokens >= 1_600, `expected at least the 1600-token image allowance, got ${tokens}`);
+  assert.ok(tokens < 1_700, `expected far below 1,000,000, got ${tokens}`);
+  assert.ok(tokens < 1_048_576 / 100, "must not read as a percent-scale share of a 1M window");
+
+  // Payload size is irrelevant: the small and large images price identically.
+  const small = tokensFor(fileContent("data:image/png;base64,AAAA"));
+  assert.equal(tokens, small);
+
+  // For contrast, the pre-fix behaviour: 4,028,684 chars / 4.
+  assert.equal(Math.round(production.length / 4), 1_007_171);
+});
+
+test("the same image is charged once through every wire shape that carries it", () => {
+  const payload = "A".repeat(4_000_000);
+  const base64DataUrl = `data:image/png;base64,${payload}`;
+  const rawBase64 = { type: "base64", data: payload, mediaType: "image/png" };
+
+  // Tool.FileContent -> data URI under `uri` (Read/MCP/codemode tool output).
+  const viaFileContent = tokensFor(fileContent(base64DataUrl));
+  // MediaPart -> Media.Asset -> Media.Source (user file attachments), both as
+  // the `Asset` class instance's own-field shape and the JSON-encoded form.
+  const viaSource = tokensFor([
+    { role: "user", content: [{ type: "media", media: { source: rawBase64 }, filename: "a.png" }] },
+  ]);
+  // Flattened `{ type, mediaType, data }` form modelled by lib/types.ts.
+  const viaFlattened = tokensFor([
+    { role: "user", content: [{ type: "media", mediaType: "image/png", data: payload }] },
+  ]);
+  // Raw base64 with no media wrapper at all (no `type`, no data URI).
+  const viaBareString = tokensFor([
+    { role: "user", content: [{ type: "text", text: payload }] },
+  ]);
+  // Media.Source bytes variant: a Uint8Array must not be walked per byte.
+  const viaBytes = tokensFor([
+    {
+      role: "user",
+      content: [
+        {
+          type: "media",
+          media: {
+            source: { type: "bytes", data: new Uint8Array(4_000_000), mediaType: "image/png" },
+          },
+        },
+      ],
+    },
+  ]);
+
+  for (const [label, tokens] of Object.entries({
+    viaFileContent,
+    viaSource,
+    viaFlattened,
+    viaBytes,
+  })) {
+    assert.ok(
+      tokens >= 1_600 && tokens < 1_750,
+      `${label} should price one image at ~1600 tokens, got ${tokens}`,
+    );
+  }
+  // A bare base64 string has no media marker, so it stays text. This is the
+  // documented boundary: only a data URI or a media part is re-priced.
+  assert.ok(viaBareString > 1_000_000, `bare base64 is text, got ${viaBareString}`);
+});
+
+test("text alongside a large image still dominates and stays at 4 chars/token", () => {
+  const image = `data:image/png;base64,${"A".repeat(4_028_662)}`;
+  const TEXT_CHARS = 40_000; // 10,000 tokens
+  const body = "x".repeat(TEXT_CHARS);
+
+  const textOnly = tokensFor([{ role: "user", content: [{ type: "text", text: body }] }]);
+  const withImage = tokensFor([
+    { role: "user", content: [{ type: "text", text: body }, { type: "text", text: image }] },
+  ]);
+
+  // The text is priced at exactly 4 chars/token, wrapper included.
+  assert.ok(textOnly >= 10_000 && textOnly < 10_100, `got ${textOnly}`);
+  // The image adds its flat allowance and essentially nothing else: 4M payload
+  // chars cannot outweigh 10k tokens of prose. The band's slack covers the
+  // `text` key and discriminator of the second part plus `estimateTokens`
+  // rounding.
+  assert.ok(withImage - textOnly >= 1_600 && withImage - textOnly < 1_610, `got ${withImage - textOnly}`);
+  assert.ok(withImage / textOnly < 1.2, "text must still dominate proportionally");
+
+  // The same holds for the `Tool.FileContent` shape, where the delta also
+  // picks up the `type`/`mime` discriminator strings of the wrapper part.
+  const viaFile = tokensFor([
+    {
+      role: "user",
+      content: [
+        { type: "text", text: body },
+        { type: "file", uri: image, mime: "image/png" },
+      ],
+    },
+  ]);
+  const delta = viaFile - textOnly;
+  assert.ok(delta >= 1_600 && delta < 1_620, `got ${delta}`);
+});
+
+test("each media item is charged the allowance for its own kind", () => {
+  const dataUrl = (mime: string, size = 1_000_000) =>
+    `data:${mime};base64,${"A".repeat(size)}`;
+
+  const image = tokensFor(fileContent(dataUrl("image/png")));
+  const audio = tokensFor(fileContent(dataUrl("audio/mpeg")));
+  const video = tokensFor(fileContent(dataUrl("video/mp4")));
+  const pdf = tokensFor(fileContent(dataUrl("application/pdf")));
+  const unknown = tokensFor(fileContent(dataUrl("application/octet-stream")));
+
+  // 1,600 / 25,000 / 100,000 / 8,000 / 4,000, each plus a small wrapper.
+  const within = (actual: number, allowance: number): boolean =>
+    actual >= allowance && actual < allowance + 100;
+  assert.ok(within(image, 1_600), `image got ${image}`);
+  assert.ok(within(audio, 25_000), `audio got ${audio}`);
+  assert.ok(within(video, 100_000), `video got ${video}`);
+  assert.ok(within(pdf, 8_000), `pdf got ${pdf}`);
+  assert.ok(within(unknown, 4_000), `unknown got ${unknown}`);
+
+  // Three images in one transcript cost three allowances, not one.
+  const imagePart = (name: string) => ({
+    role: "tool",
+    content: [
+      {
+        type: "tool-result",
+        id: `c_${name}`,
+        name: "read",
+        result: {
+          type: "content",
+          value: [{ type: "file", uri: dataUrl("image/png"), mime: "image/png", name }],
+        },
+      },
+    ],
+  });
+  const one = tokensFor([imagePart("a")]);
+  const three = tokensFor([imagePart("a"), imagePart("b"), imagePart("c")]);
+  // One image plus its tool-result wrapper lands on the flat allowance.
+  assert.ok(within(one, 1_600), `got ${one}`);
+  // Two extra allowances, plus the differing `b`/`c` and `c_b`/`c_c` name
+  // strings and `estimateTokens` rounding.
+  assert.ok(three - one >= 3_200 && three - one < 3_250, `got ${three - one}`);
+});
+
+test("pure-text transcripts measure exactly as before the media change", () => {
+  // Reference implementation: the pre-change algorithm, a pure recursive walk
+  // summing string lengths.
+  const legacyChars = (value: unknown): number => {
+    if (typeof value === "string") return value.length;
+    if (typeof value !== "object" || value === null) return 0;
+    if (Array.isArray(value)) {
+      let total = 0;
+      for (const item of value) total += legacyChars(item);
+      return total;
+    }
+    let total = 0;
+    for (const item of Object.values(value as Record<string, unknown>)) total += legacyChars(item);
+    return total;
+  };
+
+  const messages = [
+    { id: "m1", role: "system", content: [{ type: "text", text: "you are helpful" }] },
+    {
+      id: "m2",
+      role: "user",
+      content: [
+        { type: "text", text: "read the file please" },
+        { type: "text", text: "and the other one" },
+      ],
+    },
+    {
+      id: "m3",
+      role: "assistant",
+      content: [
+        { type: "reasoning", text: "thinking about it" },
+        { type: "tool-call", id: "c1", name: "read", input: { path: "/tmp/x", limit: 20 } },
+      ],
+    },
+    {
+      id: "m4",
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          id: "c1",
+          name: "read",
+          result: { type: "json", value: { lines: ["one", "two"], ok: true, n: 3 } },
+        },
+        { type: "tool-result", id: "c2", name: "grep", result: { type: "text", value: "hit" } },
+      ],
+    },
+  ];
+
+  assert.equal(measureMessagesChars(messages), legacyChars(messages));
+  assert.equal(estimateTokens(measureMessagesChars(messages)), estimateTokens(legacyChars(messages)));
+  assert.equal(measureMessagesChars(undefined), 0);
+  assert.equal(measureMessagesChars([]), 0);
+  assert.equal(measureMessagesChars([null, "str", 7]), 0);
+});
+
+test("opaque non-media strings and text/* data URIs are still counted as text", () => {
+  const opaque = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5eg==".repeat(
+    20_000,
+  );
+  // Long, base64-shaped, and starts with "data" - but not a data URI.
+  const notADataUri = `data${"A".repeat(1_000_000)}`;
+
+  const texts = [
+    { role: "user", content: [{ type: "text", text: opaque }] },
+    { role: "user", content: [{ type: "text", text: notADataUri }] },
+    // `data:text/plain;base64,...` decodes to text, so chars/4 is a bounded
+    // 1.33x over-count of the truth and no special case is warranted.
+    { role: "user", content: [{ type: "text", text: "data:text/plain;base64,QUJD" }] },
+    // A `file` content whose uri is a plain path, not a data URI.
+    { role: "tool", content: [{ type: "text", text: "read /tmp/a.txt" }] },
+  ];
+
+  for (const message of texts) {
+    const part = message.content[0];
+    assert.ok(part, "fixture must have a first part");
+    assert.ok(
+      measureMessagesChars([message]) >= part.text.length,
+      "text must be counted in full",
+    );
+  }
+  assert.ok(tokensFor([texts[0]!]) > 100_000, "opaque base64 text stays text");
+  assert.ok(tokensFor([texts[1]!]) > 100_000, "a 'data'-prefixed non-URI stays text");
+  assert.ok(tokensFor([texts[2]!]) < 10, "a tiny text data URI stays text");
+
+  // A file content with an ordinary path uri keeps counting that path.
+  const filePath = [
+    {
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          id: "c1",
+          name: "read",
+          result: { type: "content", value: [{ type: "file", uri: "/tmp/report.pdf", mime: "application/pdf" }] },
+        },
+      ],
+    },
+  ];
+  assert.ok(measureMessagesChars(filePath) > "/tmp/report.pdf".length);
+});

@@ -3,7 +3,7 @@
  * semantics (wire messages instead of stored parts).
  */
 
-import { percentOf, tokenLabel, windowClause } from "./constants"
+import { budgetClause, contextUsage } from "./constants"
 
 export const SYSTEM = `
 You manage your own context window. Your only context-management tool is \`prune\`: it replaces older conversation ranges with summaries you write, freeing tokens.
@@ -12,7 +12,7 @@ Prune completed work that is no longer relevant to the current task: finished re
 
 Judging what to prune is a scan, not a task in itself: read the topic and age of each range once, decide with the checklist in the reminder, batch what qualifies, and move on. A summary you write is the work - pruning is the cheap default, deliberating over it is not.
 
-Context pressure notes arrive as \`<dcp-system-reminder>\` messages re-measured on every dispatch: only the newest note's numbers are current. Never prune again over a percentage from an older note - a completed prune is confirmed by its tool result and by the next reminder.
+Context pressure notes arrive as \`<dcp-system-reminder>\` messages re-measured on every dispatch: only the newest note's numbers are current. Never prune again over a figure from an older note - a completed prune is confirmed by its tool result and by the next reminder. Every note reports occupancy against your context window, the only size you can check yourself; a note that says the window is exceeded is reporting an over-estimate, not a larger window.
 
 \`<dcp-message-id>\` and \`<dcp-system-reminder>\` tags are environment-injected metadata. Do not output them.
 `
@@ -30,22 +30,31 @@ A range may cover pruned block summaries (marked [Compressed conversation sectio
 - Include \`(bN)\` exactly once in the summary to carry that block's full content forward; write surrounding text so it still reads after expansion.
 - Omit \`(bN)\` to permanently drop that block's content. Do this when the work it describes no longer matters to the current task.
 - Never emit \`(bN)\` text outside a placeholder; mention blocks in prose as plain text like \`pruned bN\`.
-- A range covering ONLY already-compressed messages is rejected when it would free fewer than max(32, 1/4 of the standing summary) tokens: same-size re-summarization is a no-op. Prune uncovered messages instead, or fold/drop a block only with a substantially shorter summary.
+- A range covering ONLY already-compressed messages is rejected unless the replacement summary is at most half the standing summary AND frees at least 128 tokens: a same-size re-summarization is a no-op that costs a whole model turn. Prune uncovered messages instead, or fold/drop a block only with a substantially shorter summary.
 
 OUTPUT FORMAT
 Call with topic (3-5 word label) and content: [{ startId, endId, summary }, ...].
 `
 
 /**
- * Pressure nudge. Names absolute tokens first, then both denominators
- * explicitly (budget, and window when it differs), states that the number is
- * re-estimated per dispatch so an older percentage is never acted on - and
- * hands over a check-list judgement for WHAT to prune, so deciding costs one
- * scan rather than a deliberation (a model reasoning its way to "maybe I
- * should prune" burns the tokens it is trying to free).
+ * Pressure nudge. The measurement LEADS with the model window - the only
+ * denominator the model can reason about - and the pruning budget follows as
+ * a plain threshold, never as a percentage (see `contextUsage` in
+ * constants.ts: a budget-first headline like "999% of the pruning budget"
+ * reads as a catastrophe and drove panic-pruning at 12% real occupancy).
+ * States that the number is re-estimated per dispatch so an older figure is
+ * never acted on, and hands over a check-list judgement for WHAT to prune,
+ * so deciding costs one scan rather than a deliberation (a model reasoning
+ * its way to "maybe I should prune" burns the tokens it is trying to free).
+ *
+ * The trailing verdict is derived from the same budget comparison that
+ * produced the clause, so the two can never contradict each other. The gate in
+ * `maybeContextNudge` only calls this at or above budget, but the function is
+ * exported and must not print "the budget is not reached - prune now" if it
+ * is ever called below it.
  */
 export const CONTEXT_LIMIT_NUDGE = (usageTokens: number, budget: number, window: number) => `<dcp-system-reminder>
-Context is ~${tokenLabel(usageTokens)} tokens: ${percentOf(usageTokens, budget)}% of the ${tokenLabel(budget)}-token pruning budget${windowClause(usageTokens, budget, window)}. Re-measured on this dispatch, so it supersedes any earlier reminder - do not prune again over a stale number.
+Context is ${contextUsage(usageTokens, window)}${budgetClause(usageTokens, budget)}${usageTokens >= budget ? " - prune now." : " - no pruning needed."} Re-measured on this dispatch, so it supersedes any earlier reminder - do not prune again over a stale number.
 
 Decide in one pass over the boundary IDs, oldest first - do not deliberate. Prefer messages not yet inside a compressed section; a range qualifies when BOTH are true:
 - its work is finished (research concluded, code verified, dead end, or its outcome is already stated in later messages), and
@@ -56,9 +65,12 @@ When only one candidate exists, prune it; when in doubt between two, prune the o
 
 /**
  * One-shot acknowledgement for the first dispatch after a successful prune:
- * resolves the previous pressure reminder (whose percentage predates the
- * prune) and says whether another pass is warranted, so the model is not
- * pushed into pruning again on a number it already acted on.
+ * resolves the previous pressure reminder (whose number predates the prune)
+ * and says whether another pass is warranted, so the model is not pushed into
+ * pruning again on a number it already acted on. Same window-first spelling as
+ * the nudge - the two share `contextUsage`/`budgetClause`, so the
+ * acknowledgement can never restate the occupancy in a different notation
+ * from the reminder it resolves.
  */
 export const POST_PRUNE_ACK = (
   usageTokens: number,
@@ -68,7 +80,7 @@ export const POST_PRUNE_ACK = (
   stillOverBudget: boolean,
   messagesCovered: number | undefined,
 ) => `<dcp-system-reminder>
-Prune applied${blockRef ? ` (${blockRef})` : ""}: the earlier context reminder is resolved - that percentage predates the prune, and this dispatch re-measures ~${tokenLabel(usageTokens)} tokens: ${percentOf(usageTokens, budget)}% of the ${tokenLabel(budget)}-token pruning budget${windowClause(usageTokens, budget, window)}.
+Prune applied${blockRef ? ` (${blockRef})` : ""}: the earlier context reminder is resolved - that number predates the prune, and this dispatch re-measures ${contextUsage(usageTokens, window)}${budgetClause(usageTokens, budget)}.
 ${stillOverBudget
     ? messagesCovered === 0
       ? "That pass covered no new messages - it only re-summarized an already-compressed section, so it must not be repeated: prune messages outside the active compressed sections."

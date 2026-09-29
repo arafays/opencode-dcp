@@ -10,7 +10,7 @@ import {
 import { createSyntheticBlockMessage } from "./transcript/edit";
 import { FALLBACK_CONTEXT_WINDOW } from "./constants";
 import { PRUNE_TOOL_NAME } from "./prune-tool";
-import { formatBlockRef } from "./refs";
+import { formatBlockRef, type RefRegistry } from "./refs";
 import type { TranscriptMirror } from "./transcript/mirror";
 import { scanTranscript } from "./transcript/scan";
 import { activeBlocks, type StateStore } from "./state/store";
@@ -122,13 +122,28 @@ export function createContextHook(deps: TransformDeps) {
       const charsBefore = measureMessagesChars(messages);
 
       injectSystemPrompt(event);
-      // Keys covered by active compression blocks are invisible to the model;
-      // allocating refs for them would burn mNNNN slots past the registry's
-      // cap and silently disable DCP for the session. Skip them.
+      // Refs are a per-dispatch projection of the visible transcript: rebuild
+      // the whole table from the inbound keys, in transcript order, skipping
+      // the ones covered by active compression blocks (those messages are
+      // invisible to the model, so it must never be shown an address for
+      // them - and leaving them out is what keeps the numbering dense).
+      //
+      // The projection runs over the PRE-compression index on purpose: the
+      // prune tool resolves `mNNNN` back through this table into the mirror
+      // index (the inbound transcript), so every alias must name a key that
+      // exists there. Survivors keep their `id:`/`tool:` keys across the
+      // splice, which is why the post-compression re-scan below still finds
+      // them.
       const coveredKeys = new Set(
         activeBlocks(runtime.state).flatMap((block) => block.coveredKeys),
       );
-      assignRefs(runtime.refs, index.keys, coveredKeys);
+      const unaliased = projectRefs(runtime.refs, index.keys, coveredKeys);
+      if (unaliased > 0) {
+        deps.logger.warn("transcript exceeds message ref capacity; tail is unaddressable", {
+          sessionId,
+          unaliased,
+        });
+      }
 
       applyCompressionBlocks(runtime.state, messages, index.keys);
       pruneToolOutputs(runtime.state, messages, deps.config);
@@ -178,15 +193,18 @@ function injectSystemPrompt(event: SessionContextEvent): void {
   event.system.push({ type: "text", text: SYSTEM.trimStart() });
 }
 
-function assignRefs(
-  refs: { ensure(key: string): string },
+/**
+ * Rebuilds the ref table from the visible transcript keys, in order, so the
+ * `mNNNN` tags the model reads are dense from `m0001` and ascend with the
+ * transcript. Returns the number of keys that could not be aliased (0 unless
+ * the transcript is larger than `MESSAGE_REF_MAX_INDEX`).
+ */
+function projectRefs(
+  refs: RefRegistry,
   keys: string[],
   coveredKeys: ReadonlySet<string>,
-): void {
-  for (const key of keys) {
-    if (coveredKeys.has(key)) continue;
-    refs.ensure(key);
-  }
+): number {
+  return refs.project(keys.filter((key) => !coveredKeys.has(key)));
 }
 
 function publishDispatchStats(

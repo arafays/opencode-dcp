@@ -3,8 +3,21 @@
  * (`m0001`, `m0002`, ...) that the model uses as compress boundaries;
  * compressed blocks are addressed as `b1`, `b2`, ...
  *
- * Refs are allocated per session and persist for the session lifetime so the
- * model sees stable IDs across requests.
+ * The alias table is a PER-DISPATCH PROJECTION of the visible transcript, not
+ * a session-long allocator: every dispatch rebuilds it from the inbound key
+ * list in transcript order (`RefRegistry.project`), so the `mNNNN` the model
+ * reads are always dense from `m0001` and strictly increasing in transcript
+ * order. The model treats a lower number as "earlier" and selects ranges by
+ * comparing the two numbers it sees; a session-long allocator could not
+ * honour that, because every compression frees the low slots and the next
+ * new message is handed `m0001` again while the survivors keep high numbers
+ * (the production shape was `... m0259, m0194, m0196 ...`, which made the
+ * model emit inverted ranges like `m0006..m0129` and give up pruning).
+ *
+ * Appends between compressions are renumbered, never renumbered *around*: a
+ * new message lands at the tail, so every existing key keeps its ref and the
+ * prompt-cache prefix stays byte-identical. Compression is the only event that
+ * shifts the table, and that is exactly when the model is shown fresh tags.
  */
 
 const MESSAGE_REF_REGEX = /^m(\d{4})$/;
@@ -59,14 +72,116 @@ export interface RefRegistryJson {
 export class RefRegistry {
   readonly byKey = new Map<string, string>();
   readonly byRef = new Map<string, string>();
-  next = 1;
+  /** One past the highest index currently allocated (informational). */
+  next = MESSAGE_REF_MIN_INDEX;
 
+  /**
+   * Rebuilds the alias table from the visible transcript keys **in transcript
+   * order**: the first key becomes `m0001`, the second `m0002`, and so on.
+   *
+   * This is the only sound way to number a transcript, and the one the
+   * context hook uses on every dispatch. Duplicate keys keep their first
+   * position. Keys past `MESSAGE_REF_MAX_INDEX` are left unaliased (they get
+   * no boundary tag, so the model cannot address them) instead of throwing:
+   * a >9 999 message transcript must degrade, not fail the dispatch.
+   *
+   * @returns how many keys were left unaliased (0 in normal operation).
+   */
+  project(keys: Iterable<string>): number {
+    this.byKey.clear();
+    this.byRef.clear();
+    let index = MESSAGE_REF_MIN_INDEX;
+    let overflow = 0;
+    for (const key of keys) {
+      // First position wins: a repeated key must not claim a second slot or
+      // emit a second, conflicting tag.
+      if (this.byKey.has(key)) continue;
+      if (index > MESSAGE_REF_MAX_INDEX) {
+        overflow += 1;
+        continue;
+      }
+      const ref = formatMessageRef(index);
+      this.byKey.set(key, ref);
+      this.byRef.set(ref, key);
+      index += 1;
+    }
+    this.next = index;
+    return overflow;
+  }
+
+  /**
+   * Legacy single-key allocator: returns the key's existing ref, or claims
+   * the lowest free slot. NOT ordered, and therefore NOT safe for numbering a
+   * transcript — a `release`d low slot is handed out before a live high one,
+   * which is the inversion `project` exists to eliminate. Kept for callers
+   * that only need "give this key some ref" (tests, one-off lookups).
+   */
+  ensure(key: string): string {
+    const existing = this.byKey.get(key);
+    if (existing) return existing;
+    for (let candidate = MESSAGE_REF_MIN_INDEX; candidate <= MESSAGE_REF_MAX_INDEX; candidate++) {
+      const ref = formatMessageRef(candidate);
+      if (this.byRef.has(ref)) continue;
+      this.next = Math.max(this.next, candidate + 1);
+      this.byKey.set(key, ref);
+      this.byRef.set(ref, key);
+      return ref;
+    }
+    throw new Error(
+      `DCP message alias capacity exceeded. Cannot allocate more than ${formatMessageRef(MESSAGE_REF_MAX_INDEX)} refs in one session.`,
+    );
+  }
+
+  /**
+   * Drops the alias of each given key (unknown keys are a no-op). Pure map
+   * surgery: it deliberately has NO effect on how the next alias is chosen.
+   * Compression calls this for every covered key, and the next dispatch
+   * re-projects the surviving transcript anyway, so the freed slots are only
+   * ever reused by an explicit `project`.
+   */
+  release(keys: Iterable<string>): void {
+    for (const key of keys) {
+      const ref = this.byKey.get(key);
+      if (!ref) continue;
+      this.byKey.delete(key);
+      this.byRef.delete(ref);
+    }
+  }
+
+  keyOf(ref: string): string | undefined {
+    return this.byRef.get(ref);
+  }
+
+  refOf(key: string): string | undefined {
+    return this.byKey.get(key);
+  }
+
+  /**
+   * Restores a persisted table. Tolerant by design: the blob comes from
+   * plugin storage and may be absent, pre-`project` (session-long allocator
+   * that could have produced inverted refs), or structurally partial. Nothing
+   * here throws — unusable entries are dropped, and the first dispatch's
+   * `project` overwrites the table with an ordered one regardless.
+   */
   static from(json: RefRegistryJson | undefined): RefRegistry {
     const registry = new RefRegistry();
-    if (!json) return registry;
-    for (const [key, ref] of Object.entries(json.byKey ?? {})) registry.byKey.set(key, ref);
-    for (const [ref, key] of Object.entries(json.byRef ?? {})) registry.byRef.set(ref, key);
-    registry.next = Number.isInteger(json.next) && json.next >= 1 ? json.next : 1;
+    if (!json || typeof json !== "object") return registry;
+
+    // `byRef` is the direction resolution depends on, so it is loaded first
+    // and wins any conflict.
+    for (const [ref, key] of entries(json.byRef)) {
+      if (!isMessageRef(ref) || !key || registry.byRef.has(ref)) continue;
+      registry.byRef.set(ref, key);
+      if (!registry.byKey.has(key)) registry.byKey.set(key, ref);
+    }
+    for (const [key, ref] of entries(json.byKey)) {
+      if (!key || !isMessageRef(ref) || registry.byKey.has(key)) continue;
+      registry.byKey.set(key, ref);
+      if (!registry.byRef.has(ref)) registry.byRef.set(ref, key);
+    }
+    // `next` is re-derived rather than trusted: a stale (or corrupt) value
+    // could otherwise wedge `ensure` past the cap.
+    registry.next = onePastHighest(registry.byRef.keys());
     return registry;
   }
 
@@ -77,57 +192,28 @@ export class RefRegistry {
       next: this.next,
     };
   }
+}
 
-  /** Returns the existing ref for a key or allocates the next free one. */
-  ensure(key: string): string {
-    const existing = this.byKey.get(key);
-    if (existing) return existing;
-    let candidate = Math.max(MESSAGE_REF_MIN_INDEX, this.next);
-    while (candidate <= MESSAGE_REF_MAX_INDEX) {
-      const ref = formatMessageRef(candidate);
-      if (!this.byRef.has(ref)) {
-        this.next = candidate + 1;
-        this.byKey.set(key, ref);
-        this.byRef.set(ref, key);
-        return ref;
-      }
-      candidate++;
-    }
-    throw new Error(
-      `DCP message alias capacity exceeded. Cannot allocate more than ${formatMessageRef(MESSAGE_REF_MAX_INDEX)} refs in one session.`,
-    );
+/** `Object.entries` over a string map, tolerating any other shape. */
+function entries(value: unknown): Array<[string, string]> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  const out: Array<[string, string]> = [];
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof entry === "string") out.push([key, entry]);
   }
+  return out;
+}
 
-  /**
-   * Releases refs for the given keys so their slots can be reused by later
-   * allocations. Unknown keys are a no-op. `next` is recomputed as the lowest
-   * index >= 1 not currently allocated (scanning the full range), so slots
-   * freed by compression are handed out again before the cap is ever reached.
-   */
-  release(keys: Iterable<string>): void {
-    for (const key of keys) {
-      const ref = this.byKey.get(key);
-      if (!ref) continue;
-      this.byKey.delete(key);
-      this.byRef.delete(ref);
-    }
-    let candidate = MESSAGE_REF_MIN_INDEX;
-    while (candidate <= MESSAGE_REF_MAX_INDEX) {
-      if (!this.byRef.has(formatMessageRef(candidate))) {
-        this.next = candidate;
-        return;
-      }
-      candidate++;
-    }
-    // Every slot is taken: point past the cap so `ensure` fails fast.
-    this.next = MESSAGE_REF_MAX_INDEX + 1;
-  }
+function isMessageRef(ref: string): boolean {
+  return parseMessageRef(ref) !== null;
+}
 
-  keyOf(ref: string): string | undefined {
-    return this.byRef.get(ref);
+/** One past the highest parseable ref in an iterable (clamped to the cap). */
+function onePastHighest(refs: Iterable<string>): number {
+  let highest = 0;
+  for (const ref of refs) {
+    const index = parseMessageRef(ref);
+    if (index !== null && index > highest) highest = index;
   }
-
-  refOf(key: string): string | undefined {
-    return this.byKey.get(key);
-  }
+  return Math.min(highest + 1, MESSAGE_REF_MAX_INDEX + 1);
 }
