@@ -44,8 +44,7 @@
     "prepublishOnly": "npm run typecheck && npm run test && npm run build"
   },
   "dependencies": {
-    "@opencode/plugin": "latest",
-    "effect": "^3.22.2"
+    "@opencode/plugin": "latest"
   },
   "devDependencies": {
     "@opencode/theme": "latest",

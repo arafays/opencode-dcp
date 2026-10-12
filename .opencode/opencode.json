@@ -12,6 +12,15 @@
       }
     }
   ],
+  "experimental": {
+    "policies": [
+      {
+        "action": "integration.use",
+        "resource": "plugin:opencode-dcp",
+        "effect": "deny"
+      }
+    ]
+  },
   "lsp": true,
   "references": {
     "opencode-v2": {
