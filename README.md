@@ -6,8 +6,8 @@ Keeps the model's context window high-signal by letting the model compress close
 sections of the conversation into its own dense technical summaries, pruning
 superseded tool outputs, and nudging when context pressure crosses a budget.
 
-> Requires OpenCode V2 (`opencode2`). The plugin API is beta; pin versions that
-> match your OpenCode release.
+> Requires OpenCode V2 (`opencode2`, 2.0+). The 2.x plugin API can still shift
+> between releases, so the package tracks `@opencode/plugin` directly.
 
 ## Install
 
@@ -59,12 +59,8 @@ sibling `tui.*` file beside a local plugin's `index.*` entrypoint — so the
 companion loads for this local-path entry too, exactly like the `./tui` export
 does for package installs.
 
-> Requires OpenCode V2 (`opencode2`). OpenCode V2 auto-updates, so the package
-> tracks `@opencode/plugin` (the committed lockfile pins the exact resolved
-> version for local dev). Don't use a caret range on a prerelease
-> (`^0.0.0-beta-…`) — npm treats any lexically-greater `0.0.0-*` prerelease as
-> satisfying the range, and junk tags like `windows-fix` lack the `Plugin`
-> export.
+> OpenCode V2 auto-updates, so the package tracks `@opencode/plugin`; the
+> committed lockfile pins the exact resolved version for local dev.
 
 ## How it works
 
