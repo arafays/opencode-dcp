@@ -1,6 +1,12 @@
 import type { DcpOptions } from "./config";
 import type { Logger } from "./logger";
-import { maybeContextNudge, maybeIterationNudge, maybePruneAck, type UsageTracker } from "./nudges";
+import {
+  maybeContextNudge,
+  maybeIterationNudge,
+  maybePruneAck,
+  takeManualPruneReminder,
+  type UsageTracker,
+} from "./nudges";
 import {
   applyCompressionBlocks,
   injectBoundaryTags,
@@ -48,11 +54,22 @@ export interface SessionContextEvent {
   readonly model: { readonly providerID: string; readonly id: string; readonly variant?: string };
   /**
    * Effective tool set for this request, keyed by the name the model sees.
-   * Populated by opencode-v2 (`SessionContext.tools`); absent on older betas,
-   * so every reader must treat it as optional.
+   *
+   * REQUIRED in the current contract (`SessionContext.tools`,
+   * packages/plugin/src/promise/session.ts:35) and optional here on purpose:
+   * the published plugin runs against whatever opencode server the user has
+   * installed, which can be older than the `@opencode/plugin` types it was
+   * compiled against, so a runtime that never sends it must degrade to "assume
+   * the tool is callable" rather than crash the context hook. Readers must keep
+   * treating it as optional.
    */
   tools?: Record<string, { description?: string; input?: unknown }>;
-  /** Request generation options (also absent on older betas). */
+  /**
+   * Request generation options (`SessionRequest.options`,
+   * packages/plugin/src/promise/session.ts:30). Same required-in-contract,
+   * optional-here split as `tools`, for the same version-skew reason. No reader
+   * today; DCP never rewrites generation options, only the transcript.
+   */
   options?: Record<string, unknown>;
   system: SystemPart[];
   messages: WireMessage[];
@@ -252,6 +269,27 @@ async function injectNudges(
 ): Promise<void> {
   const reminders: string[] = [];
 
+  // A context nudge is only actionable when the model can actually call
+  // `prune`. Core refuses a call whose tool is absent from the request's
+  // definition map ("Tool is not available for this request"), so when another
+  // transform dropped the tool, or permission rules hid it, or registration
+  // failed, the reminder would be pure noise. `tools` is optional because
+  // older betas never sent it - there we keep nudging rather than going silent.
+  // Computed up front because the manual-prune reminder below is gated the same
+  // way: it asks for the identical call, so it is equally noise without the tool.
+  const canPrune = !event.tools || Object.hasOwn(event.tools, PRUNE_TOOL_NAME);
+
+  // `/dcp-prune` (lib/commands.ts) arms a one-shot reminder before prompting.
+  // It is released ONLY by a dispatch that actually carries the command's
+  // stored turn - see `carriesPruneRequest` for why the next dispatch is not
+  // necessarily that one. A dispatch carrying the request always CONSUMES the
+  // entry, even when it cannot honor it: leaving it armed would let "prune now"
+  // resurface on a later, unrelated turn. Reaching here also means the
+  // internal-agent and sub-agent skips already returned, so the parent session's
+  // reminder is consumed by the parent's own dispatch, never a skipped one.
+  const manualPrune = takeManualPruneReminder(event.sessionID, event.messages);
+  if (manualPrune && canPrune) reminders.push(manualPrune);
+
   // Context pressure is the max of two independent estimates:
   // - the provider-reported usage delta (`UsageTracker`). Exact while warm,
   //   but blind to 0 across a full baseline-rebuild window: after a process
@@ -295,13 +333,8 @@ async function injectNudges(
     // and resolves the reminder the model just acted on.
     reminders.push(ack);
   } else {
-    // A context nudge is only actionable when the model can actually call
-    // `prune`. Core refuses a call whose tool is absent from the request's
-    // definition map ("Tool is not available for this request"), so when another
-    // transform dropped the tool, or permission rules hid it, or registration
-    // failed, the reminder would be pure noise. `tools` is optional because
-    // older betas never sent it - there we keep nudging rather than going silent.
-    const canPrune = !event.tools || Object.hasOwn(event.tools, PRUNE_TOOL_NAME);
+    // Gated on `canPrune` (computed above, and shared with the manual reminder):
+    // without the tool, a nudge is pure noise.
     if (canPrune && usageTokens > 0) {
       const nudge = maybeContextNudge({
         state,

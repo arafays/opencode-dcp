@@ -1,5 +1,5 @@
 import type { Logger } from "./logger"
-import { UsageTracker } from "./nudges"
+import { disarmManualPruneReminder, UsageTracker } from "./nudges"
 import type { StateStore } from "./state/store"
 import type { TranscriptMirror } from "./transcript/mirror"
 
@@ -12,6 +12,18 @@ import type { TranscriptMirror } from "./transcript/mirror"
  * - `session.revert.committed` -> history truncated: reset DCP
  * - `session.forked`          -> new session id, parent's blocks do not apply
  * - `session.deleted`        -> drop all session state
+ *
+ * Every reset case also clears the session's armed manual-prune reminder
+ * (`pendingManualPrune`), which is process-local and would otherwise leak for
+ * the lifetime of the process once its session is gone.
+ *
+ * Every name above still exists verbatim in the generated server event union
+ * (packages/client/src/promise/generated/types.ts). The lifecycle events that
+ * arrived alongside the compaction/revert additions are deliberately NOT
+ * handled: `session.revert.staged` / `session.revert.cleared` move a pending
+ * revert boundary without rewriting history (only `committed` truncates), and
+ * `session.compaction.delta` is the streamed summary text. None of them
+ * supersedes a case above.
  *
  * The pump runs detached from setup and is aborted via the cleanup function.
  */
@@ -76,6 +88,7 @@ export function startEventPump(input: {
               store.reset(sessionId)
               mirror.drop(sessionId)
               usage.reset(sessionId)
+              disarmManualPruneReminder(sessionId)
               logger.debug("session event; DCP state reset", {
                 sessionId,
                 reason: event.type,

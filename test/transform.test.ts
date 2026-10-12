@@ -12,7 +12,7 @@ import { scanTranscript } from "../lib/transcript/scan";
 import type { RefRegistry } from "../lib/refs";
 import { pruneToolDefinition } from "../lib/prune-tool";
 import { estimateTokens, measureMessagesChars } from "../lib/tui-bridge";
-import type { WireMessage } from "../lib/types";
+import type { SystemPart, WireMessage } from "../lib/types";
 
 const CONFIG = resolveOptions(undefined, () => {});
 const SESSION = "ses_transform";
@@ -651,4 +651,172 @@ test("boundary tags are dense and ascending after a compression, and stay resolv
     { sessionID: SESSION },
   );
   assert.ok(String(last.content).includes("b2"), String(last.content));
+});
+
+// -- provider state survives every outbound edit ------------------------------
+
+/**
+ * DCP rewrites the outbound transcript only, and every rewrite is
+ * copy-on-write (`{ ...part }` / `{ ...message, content }`). The real `Message`
+ * and part shapes carry provider-bound state the platform replays -
+ * `providerMetadata` (Gemini thought signatures, OpenAI item ids), `native`,
+ * `cache` breakpoints (packages/ai/src/schema/options.ts:317) and `metadata`
+ * (attachment descriptions, packages/core/src/session/runner/to-llm-message.ts:47)
+ * - so an edit that rebuilt a part or a message from a subset of fields would
+ * silently corrupt them. These tests pin that contract at the hook level.
+ */
+test("the injected system prompt leaves existing system parts untouched", async () => {
+  const { hook } = harness();
+  const cached: SystemPart = { type: "text", text: "agent prompt", cache: { type: "ephemeral" } };
+  const described: SystemPart = { type: "text", text: "appended note", metadata: { source: "core" } };
+  const system: SystemPart[] = [cached, described];
+  await hook({
+    sessionID: SESSION,
+    agent: "default",
+    model: { providerID: "p", id: "m" },
+    system,
+    messages: fixture(),
+  });
+  // Appended, never replaced: the earlier parts keep their cache hints and
+  // metadata object identity.
+  assert.equal(system.length, 3);
+  assert.equal(system[0], cached);
+  assert.equal(system[1], described);
+  assert.deepEqual(system[0]!.cache, { type: "ephemeral" });
+  assert.deepEqual(system[1]!.metadata, { source: "core" });
+  assert.match(system[2]!.text, /You manage your own context window/);
+});
+
+test("boundary tagging preserves cache hints, metadata and providerMetadata on the tagged part", async () => {
+  const { hook } = harness();
+  const messages: WireMessage[] = [
+    {
+      id: "u1",
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: "attached",
+          cache: { type: "ephemeral" },
+          metadata: { attachment: { name: "notes.md" } },
+          providerMetadata: { google: { thoughtSignature: "sig" } },
+        },
+      ],
+    },
+  ];
+  await hook({
+    sessionID: SESSION,
+    agent: "default",
+    model: { providerID: "p", id: "m" },
+    system: [],
+    messages,
+  });
+  const part = messages[0]!.content[0]!;
+  assert.equal(part.type, "text");
+  assert.match(part.text, /<dcp-message-id>m0001<\/dcp-message-id>/);
+  assert.deepEqual(part.cache, { type: "ephemeral" });
+  assert.deepEqual(part.metadata, { attachment: { name: "notes.md" } });
+  assert.deepEqual(part.providerMetadata, { google: { thoughtSignature: "sig" } });
+});
+
+test("message-level providerMetadata and native survive compression and pruning", async () => {
+  const { store, mirror, hook } = harness();
+  const stateful = (id: string): Pick<WireMessage, "providerMetadata" | "native"> => ({
+    providerMetadata: { anthropic: { cacheScope: id } },
+    native: { keep: id },
+  });
+  const messages: WireMessage[] = [
+    {
+      id: "u1",
+      role: "user",
+      content: [{ type: "text", text: "explore auth" }],
+      ...stateful("u1"),
+    },
+    {
+      id: "a1",
+      role: "assistant",
+      content: [{ type: "tool-call", id: "c1", name: "read", input: { filePath: "a.ts" } }],
+      ...stateful("a1"),
+    },
+    {
+      id: "t1",
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          id: "c1",
+          name: "read",
+          providerMetadata: { anthropic: { itemId: "msg_1" } },
+          result: { type: "text", value: "...auth files..." },
+        },
+      ],
+      ...stateful("t1"),
+    },
+    { id: "u2", role: "user", content: [{ type: "text", text: "now compress it" }] },
+  ];
+  const dispatch = (input: WireMessage[]) =>
+    hook({
+      sessionID: SESSION,
+      agent: "default",
+      model: { providerID: "p", id: "m" },
+      system: [],
+      messages: input,
+    });
+  const originalToolMessage = messages[2]!;
+  await dispatch(messages);
+
+  // Boundary tagging rewrote the tool message (new object); the provider state
+  // rode along on the copy.
+  const tagged = messages[2]!;
+  assert.notEqual(tagged, originalToolMessage);
+  assert.deepEqual(tagged.providerMetadata, { anthropic: { cacheScope: "t1" } });
+  assert.deepEqual(tagged.native, { keep: "t1" });
+  assert.deepEqual((tagged.content[0] as { providerMetadata: unknown }).providerMetadata, {
+    anthropic: { itemId: "msg_1" },
+  });
+  assert.deepEqual(messages[0]!.providerMetadata, { anthropic: { cacheScope: "u1" } });
+
+  // Prune the range through the model-facing tool, then re-dispatch a fresh
+  // transcript: edits there must preserve provider state just the same.
+  const tool = pruneToolDefinition({
+    store,
+    mirror,
+    logger: createLogger(false),
+    config: CONFIG,
+    getModelContextLimit: () => 200_000,
+    getUsageTokens: () => 0,
+  });
+  await tool.execute(
+    {
+      topic: "Exploration",
+      content: [{ startId: "m0001", endId: "m0004", summary: "Explored auth." }],
+    },
+    { sessionID: SESSION },
+  );
+
+  const next: WireMessage[] = [
+    { id: "u3", role: "user", content: [{ type: "text", text: "keep going" }], ...stateful("u3") },
+    {
+      id: "t3",
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          id: "c1",
+          name: "read",
+          providerMetadata: { anthropic: { itemId: "msg_2" } },
+          result: { type: "text", value: "...auth files..." },
+        },
+      ],
+      ...stateful("t3"),
+    },
+    { id: "u4", role: "user", content: [{ type: "text", text: "done" }], ...stateful("u4") },
+  ];
+  await dispatch(next);
+  const result = next[1]!;
+  assert.deepEqual(result.providerMetadata, { anthropic: { cacheScope: "t3" } });
+  assert.deepEqual(result.native, { keep: "t3" });
+  assert.deepEqual((result.content[0] as { providerMetadata: unknown }).providerMetadata, {
+    anthropic: { itemId: "msg_2" },
+  });
 });

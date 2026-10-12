@@ -13,11 +13,16 @@ export type MessageRole = "system" | "user" | "assistant" | "tool";
 export interface SystemPart {
   type: "text";
   text: string;
+  cache?: unknown;
+  metadata?: Record<string, unknown>;
 }
 
 export interface TextPart {
   type: "text";
   text: string;
+  cache?: unknown;
+  metadata?: Record<string, unknown>;
+  providerMetadata?: unknown;
 }
 
 /**
@@ -63,7 +68,23 @@ export interface ToolCallPart {
   type: "tool-call";
   id: string;
   name: string;
+  /**
+   * Registry namespace, e.g. the MCP server a tool came from
+   * (`packages/core/src/tool/mcp.ts` registers `options.namespace`).
+   * {@link qualifiedToolName} folds it into the name the model is shown.
+   */
+  namespace?: string;
   input: unknown;
+  /**
+   * The provider ran the tool itself (`google_search`, OpenAI hosted tools).
+   * Core's history lowering then emits BOTH the call and its result inside the
+   * same assistant message, and the protocol drops the call while replaying the
+   * result - so such a result is provider state, never DCP-prunable output.
+   */
+  providerExecuted?: boolean;
+  cache?: unknown;
+  metadata?: Record<string, unknown>;
+  providerMetadata?: unknown;
 }
 
 export interface ToolTextContent {
@@ -91,15 +112,79 @@ export interface ToolResultPart {
   type: "tool-result";
   id: string;
   name: string;
+  namespace?: string;
   result: ToolResultValue;
+  providerExecuted?: boolean;
+  cache?: unknown;
+  metadata?: Record<string, unknown>;
+  providerMetadata?: unknown;
 }
 
 export interface ReasoningPart {
   type: "reasoning";
   text: string;
+  /**
+   * Reasoning signature replayed verbatim when the provider keys it here rather
+   * than in `providerMetadata` (Bedrock Converse,
+   * packages/ai/src/protocols/bedrock-converse.ts:262). DCP never rewrites a
+   * reasoning part, so this only has to survive copy-on-write edits.
+   */
+  encrypted?: string;
+  cache?: unknown;
+  metadata?: Record<string, unknown>;
+  providerMetadata?: unknown;
 }
 
-export type ContentPart = TextPart | MediaPart | ToolCallPart | ToolResultPart | ReasoningPart;
+/**
+ * A provider-generated context checkpoint (`CompactionPart` in
+ * packages/ai/src/schema/messages.ts). Exactly one of `encrypted` (OpenAI
+ * Responses checkpoint) or `text` (Anthropic compaction block) is present, and
+ * the payload is provider state that only the originating provider can replay
+ * - it is never summarizable text and never prunable tool output, but it IS
+ * billed as input, so it must be measured like any other part.
+ */
+export interface CompactionPart {
+  type: "compaction";
+  provider: string;
+  id?: string;
+  encrypted?: string;
+  /** Null means the provider failed to produce a summary; history is retained. */
+  text?: string | null;
+}
+
+/** Reasoning-effort change marker (`Message.effort`), a role:"system" message. */
+export interface EffortPart {
+  type: "effort";
+  effort?: string;
+  previous?: string;
+}
+
+export type ContentPart =
+  | TextPart
+  | MediaPart
+  | ToolCallPart
+  | ToolResultPart
+  | ReasoningPart
+  | CompactionPart
+  | EffortPart;
+
+/**
+ * The name a tool is addressed by in the transcript.
+ *
+ * OpenCode flattens a namespace into the tool's own name before the model ever
+ * sees it: core's registry key is `effectiveName(tool)` =
+ * `${namespace}_${normalizedName}` (packages/core/src/tool/runtime.ts:278), and
+ * the AI layer joins the same way when lowering a request that kept its
+ * namespaces (`flattenToolRequest`, packages/ai/src/protocols/shared.ts:308).
+ * The wire form is therefore normally `name` alone with `namespace` absent,
+ * but a route that keeps namespaces natively (OpenAI Responses) echoes a leaf
+ * `name` plus `namespace`. Joining here reproduces the platform's own spelling
+ * in both cases, so name-based matching (protection globs, dedupe signatures)
+ * stays unambiguous when two tools share a leaf name across namespaces.
+ */
+export function qualifiedToolName(name: string, namespace?: string): string {
+  return namespace === undefined || namespace === "" ? name : `${namespace}_${name}`;
+}
 
 /**
  * One entry of the outbound transcript. Instances may be Effect Schema class
@@ -111,6 +196,16 @@ export interface WireMessage {
   role: MessageRole;
   content: ContentPart[];
   metadata?: Record<string, unknown>;
+  /**
+   * Model-scoped provider state carried by the whole message (Gemini thought
+   * signatures, OpenAI item ids). Replayable only against the model that
+   * produced it. Every DCP edit is a `{ ...message, content }` copy, so this
+   * survives rewrites; it is declared because copy-on-write edits must never
+   * silently drop a field the provider needs.
+   */
+  providerMetadata?: unknown;
+  /** Uninterpreted provider payload replayed verbatim. */
+  native?: Record<string, unknown>;
 }
 
 /** Flattens a tool result value to the text the model effectively sees. */

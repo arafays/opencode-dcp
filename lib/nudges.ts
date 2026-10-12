@@ -1,7 +1,8 @@
 import type { DcpOptions } from "./config";
 import { NUDGE_ANCHOR_CAP } from "./constants"
 import { resolveLimit } from "./config";
-import { CONTEXT_LIMIT_NUDGE, ITERATION_NUDGE, POST_PRUNE_ACK } from "./prompts"
+import { CONTEXT_LIMIT_NUDGE, ITERATION_NUDGE, POST_PRUNE_ACK, PRUNE_REQUEST_PREFIX } from "./prompts"
+import type { WireMessage } from "./types"
 
 /**
  * Context-pressure reminders. Context occupancy is estimated two ways, and
@@ -221,4 +222,114 @@ export function maybeIterationNudge(input: {
   if (threshold <= 0) return undefined
   if (input.messagesSinceUserTurn < threshold) return undefined
   return ITERATION_NUDGE(input.messagesSinceUserTurn)
+}
+
+/**
+ * Manual-prune reminders armed by `/dcp-prune` (lib/commands.ts), keyed by
+ * session and consumed on sight by the context hook's next dispatch.
+ *
+ * Process-local and deliberately NOT persisted, unlike everything in
+ * `SessionState`: the reminder exists only to ride the dispatch the command
+ * itself triggers. Persisting it would let a stale "prune now" survive a
+ * restart and fire into whatever the user happens to say next - strictly worse
+ * than the command silently doing nothing.
+ *
+ * Lifecycle guarantees:
+ * - One entry per session, so re-arming REPLACES: repeated invocations cannot
+ *   accumulate, and there is no queue to drain.
+ * - The command disarms when its `session.prompt` rejects, so an entry exists
+ *   only while a dispatch is genuinely pending. A queued prompt may legitimately
+ *   wait out a long-running turn, so no wall-clock expiry is applied here -
+ *   expiry would drop exactly the reminder a queued invocation still needs.
+ * - Keyed by session ID, which is what keeps the sub-agent path honest: a
+ *   sub-agent dispatch carries its own ID (and `handleContext` skips it outright
+ *   unless `allowSubAgents`), so it can neither consume nor strand the parent
+ *   session's reminder.
+ * - Released ONLY on a dispatch that actually carries the command's stored turn
+ *   (`carriesPruneRequest`), never merely because one is the next to happen. See
+ *   that function for why "next dispatch" is the wrong trigger, and why the
+ *   invocation's own stored text is the match target rather than the shared
+ *   opener.
+ */
+const pendingManualPrune = new Map<string, { reminder: string; marker: string }>()
+
+/**
+ * Arms the one-shot reminder for `sessionId`, replacing any earlier one.
+ * `marker` defaults to the bare `PRUNE_REQUEST_PREFIX`; `/dcp-prune` passes its
+ * invocation's exact stored text, which is what pins the release to THAT
+ * invocation.
+ */
+export function armManualPruneReminder(
+  sessionId: string,
+  reminder: string,
+  marker: string = PRUNE_REQUEST_PREFIX,
+): void {
+  pendingManualPrune.set(sessionId, { reminder, marker })
+}
+
+/**
+ * Drops an armed reminder whose prompt never dispatched (the command's
+ * `session.prompt` rejected), so it cannot misfire on a later prompt.
+ */
+export function disarmManualPruneReminder(sessionId: string): void {
+  pendingManualPrune.delete(sessionId)
+}
+
+/**
+ * True when this outbound transcript actually contains the user turn
+ * `/dcp-prune` stored - the condition for releasing an armed reminder.
+ *
+ * Releasing on "the next dispatch" is wrong for any command run mid-turn, which
+ * is when a user actually reaches for `/dcp-prune`. The stored turn does not
+ * reach the model immediately: `session.prompt` only ADMITS it to the inbox
+ * (packages/core/src/session/session.ts:145-160), and the default `steer`
+ * delivery is PROMOTED at a step boundary
+ * (packages/core/src/session/inbox.ts:44-45, promote at :495-520) while the
+ * step loop selects context BEFORE promoting
+ * (packages/core/src/session/runner/llm.ts:165-166). So the in-flight turn's
+ * next agentic step dispatches without the user's request in it. Releasing on
+ * that step hands the model an unrequested "immediately call `prune`" before it
+ * has seen the request, and strips the one-pass/batch guidance from the
+ * dispatch that does carry it.
+ *
+ * Matching the armed invocation's own stored text (the marker, defaulting to
+ * the bare `PRUNE_REQUEST_PREFIX`) rather than "the newest user turn" keeps
+ * working once the user has sent something else afterwards, and stays correct
+ * when the stored turn has since been compressed away: an armed reminder whose
+ * request is no longer visible simply stops being released rather than
+ * misfiring onto an unrelated turn. An EXACT stored text - not just the shared
+ * opener - is what keeps an earlier `/dcp-prune`'s stored turn, which stays in
+ * the transcript, from releasing a newer reminder on the first in-flight step.
+ */
+export function carriesPruneRequest(
+  messages: readonly WireMessage[],
+  marker: string = PRUNE_REQUEST_PREFIX,
+): boolean {
+  return messages.some(
+    (message) =>
+      message.role === "user" &&
+      message.content.some(
+        (part) => part.type === "text" && part.text.startsWith(marker),
+      ),
+  )
+}
+
+/**
+ * Consumes the reminder armed by `/dcp-prune`, but only on a dispatch that
+ * carries the command's stored turn (see `carriesPruneRequest`); undefined on
+ * every other dispatch, armed entry left in place for the one that does. The
+ * single `take` IS the injection point (`injectNudges` queues whatever it
+ * returns into the same synthetic block as every other reminder), so one
+ * invocation can never be replayed onto a later dispatch.
+ *
+ * Guard order matters: this runs on every dispatch and the map is empty on
+ * almost all of them, so the O(1) lookup comes FIRST and the full transcript
+ * scan (`carriesPruneRequest`) only runs when a reminder is actually armed.
+ */
+export function takeManualPruneReminder(sessionId: string, messages: readonly WireMessage[]): string | undefined {
+  const entry = pendingManualPrune.get(sessionId)
+  if (entry === undefined) return undefined
+  if (!carriesPruneRequest(messages, entry.marker)) return undefined
+  pendingManualPrune.delete(sessionId)
+  return entry.reminder
 }

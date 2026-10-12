@@ -261,7 +261,25 @@ export function measureMessagesChars(messages: unknown): number {
   return total;
 }
 
-function measurePartChars(value: unknown): number {
+/**
+ * Character cost of ONE node of the outbound wire transcript - a message, a
+ * content part, or any field inside one - priced exactly as
+ * {@link measureMessagesChars} prices the whole thing: inline `data:` URIs and
+ * `MediaPart -> Asset -> Source` payloads get a flat per-kind allowance, and
+ * every other value falls through to the generic field walk (which is what
+ * prices a `compaction` checkpoint blob by its own length).
+ *
+ * Exported so `estimateCoveredTokens` (lib/prune-tool.ts) can price the part
+ * kinds that have no model-visible text field with the SAME walk the context
+ * estimate uses. One pricing rule is the whole point: a second one would let the
+ * savings a prune reports drift away from the estimate that produced the
+ * pressure warning.
+ *
+ * Cost is field-walk, not payload-walk: a multi-megabyte `encrypted` blob
+ * contributes its `.length`, and a `Uint8Array` source contributes its
+ * `byteLength`, so nothing here materialises or copies media or checkpoints.
+ */
+export function measurePartChars(value: unknown): number {
   if (typeof value === "string") {
     const media = dataUriAllowanceChars(value);
     return media < 0 ? value.length : media;
@@ -332,6 +350,14 @@ function measureObjectChars(record: Record<string, unknown>): number {
   // 4,000 tokens for a 40-byte object; going through the part keeps the
   // wrappers (`MediaPart` -> `Media.Asset` -> `Media.Source`) walking normally
   // so nothing double-charges on the way down.
+  //
+  // Every other tagged part - `compaction` and `effort` included - falls
+  // through to the generic field walk, which prices its own string fields.
+  // That is what keeps a `CompactionPart` honest: a provider checkpoint is
+  // either a large `encrypted` blob (OpenAI Responses) or a replayed `text`
+  // summary (Anthropic), and the provider bills it as input on every following
+  // request, so it must land in the estimate instead of reading as an empty
+  // part that hides real window pressure.
   if (record["type"] !== "media") return measureFields(record, undefined);
 
   const asset = asRecord(record["media"]);

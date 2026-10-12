@@ -1,6 +1,12 @@
 import { Plugin } from "@opencode/plugin";
 
-import { pruneToolDefinition } from "./lib/prune-tool";
+import {
+  addPruneTool,
+  PRUNE_TOOL_NAME,
+  pruneToolDefinition,
+  pruneToolRegistered,
+  type PruneToolEditor,
+} from "./lib/prune-tool";
 import { resolveOptions } from "./lib/config";
 import { registerCommands } from "./lib/commands";
 import { startEventPump } from "./lib/events";
@@ -209,25 +215,54 @@ export default Plugin.define({
       await handleContext(typed);
     });
 
+    // Registration failure is otherwise silent, so latch one warning per
+    // plugin generation. Core's editor `add` drops a definition that fails
+    // `registrationError` and only surfaces the reason through
+    // `Effect.logError` in the domain's `notify` (packages/core/src/tool.ts:
+    // 206-218) - never to the plugin. Without this the DCP system prompt keeps
+    // advertising `prune` while every call fails with core's generic 'No tool
+    // named "prune" is currently available'. Tool transforms run on registration
+    // and reloads, never per dispatch, and a repeated identical warning adds
+    // nothing, so one per generation is the whole budget.
+    let registrationWarned = false;
+    const warnRegistration = (message: string) => {
+      if (registrationWarned) return;
+      registrationWarned = true;
+      logger.warn(`prune tool NOT registered: ${message}`);
+    };
+
     // Observe prune executions with the authoritative IDs the transcript scan
     // cannot provide (messageID, status, input-decode failures our body never
     // sees). tool.hook has no tool-name filter, so filter client-side; log
     // only — the callback must never throw (a throwing hook fails the tool
     // run) and never mutates.
+    //
+    // `id` is the `Tool.CallID` the runtime assigns to this call - the same id the
+    // tool_call part carries in the transcript, so a log line can be joined
+    // straight to the model output that produced it. `input` is deliberately
+    // NOT logged: for `prune` it is the model's full re-summarized text (often
+    // thousands of tokens per range), and the tool body already logs the
+    // failure with its session at debug.
     await ctx.tool.hook("execute.after", (event) => {
-      if (event.tool !== "prune") return;
+      if (event.tool !== PRUNE_TOOL_NAME) return;
       try {
         if (event.status === "error") {
           logger.warn("prune tool call failed", {
             messageID: event.messageID,
             sessionID: event.sessionID,
             agent: event.agent,
+            id: event.id,
+            // `Tool.Error` is an Effect TaggedError extending Error, so
+            // String() renders `Tool.Error: <message>`; the runner wraps any
+            // foreign throw into exactly that shape before the hook fires
+            // (packages/core/src/tool/runtime.ts:37-45).
             error: String(event.error),
           });
         } else {
           logger.debug("prune tool call completed", {
             messageID: event.messageID,
             sessionID: event.sessionID,
+            id: event.id,
           });
         }
       } catch {
@@ -236,8 +271,8 @@ export default Plugin.define({
     });
 
     await ctx.tool.transform((tools) => {
-      addTool(
-        tools as unknown as AddableTools,
+      const registration = addPruneTool(
+        tools as unknown as PruneToolEditor,
         pruneToolDefinition({
           store,
           mirror,
@@ -261,7 +296,39 @@ export default Plugin.define({
           recordCompression,
         }),
       );
+      if (!registration.ok) warnRegistration(registration.reason);
     });
+
+    // One end-to-end confirmation against the COMMITTED registry, once per
+    // plugin generation. `ctx.tool.transform` already rebuilt the draft before
+    // it resolved (State.transform registers, then notifies, which runs the
+    // transform synchronously - packages/core/src/state.ts:224-249), so this
+    // only adds what the editor-local check cannot see: a transform registered
+    // later in the chain dropping or shadowing `prune`. `ToolDomain.list` is a
+    // plain read of the committed map (adapter -> core `Tool.Interface.list`,
+    // packages/core/src/tool.ts:224). Absent on pre-`ToolDomain.list` runtimes,
+    // where the editor-local check above already stands.
+    //
+    // shortcut: this sees only the transforms registered at setup time, so a
+    // transform registered after ours that drops `prune` is invisible here;
+    // upgrade by re-checking from the context hook, where `canPrune`
+    // (lib/transform.ts) already knows per dispatch whether `prune` is exposed.
+    if (typeof ctx.tool.list === "function") {
+      void ctx.tool
+        .list()
+        .then((registered) => {
+          if (!pruneToolRegistered(registered)) {
+            warnRegistration(
+              "`prune` is missing from the committed tool registry; a tool transform registered during plugin setup may have removed or overridden it - a transform registered after this plugin's setup is not visible to this check",
+            );
+          }
+        })
+        .catch((error) => {
+          logger.debug("tool registry check unavailable", {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+    }
 
     await ctx.command.transform((draft) => {
       registerCommands(draft, ctx);
@@ -280,16 +347,31 @@ export default Plugin.define({
 
     // Storage GC — startup reconcile. session.deleted (lib/events.ts) drops
     // state while we're up; sessions deleted while the plugin was down leave
-    // orphaned `session/*` keys forever. The plugin contract exposes no
-    // session.list, so probe each persisted key with session.get and delete
-    // ONLY a positively identified not-found: the declared body carries
-    // _tag/name "SessionNotFoundError" (declared() copies body fields onto
-    // the Error and sets name = _tag), its message, or an UnexpectedStatus
-    // ClientError whose cause carries status 404. Transport/5xx/malformed
-    // errors keep the key — an orphan is cheap, a wrongly deleted live
-    // session would lose its compression blocks. storage.scan exists on the
-    // context storage but not on our StateStore storage type, so scan via
-    // ctx.storage directly.
+    // orphaned `session/*` keys forever.
+    //
+    // The plugin contract still exposes no session LIST (SessionDomain picks
+    // create/get/remove/switchAgent/switchModel/prompt/generate/command/
+    // compact/synthetic/interrupt/update/move/wait/context plus `hook` —
+    // packages/plugin/src/promise/session.ts:153-172), so there is no cheaper
+    // way to ask "does this session still exist?" than probing each persisted
+    // key with session.get.
+    //
+    // `session.remove` (DELETE /api/session/{id}) and `session.compact` both
+    // joined that domain and are deliberately NOT used here: remove DELETES
+    // the user's session, so calling it on a key we merely believe is an
+    // orphan would destroy a live conversation, and compact spends a model
+    // turn to summarise one. Neither can distinguish orphan from live the way
+    // a positively identified not-found does.
+    //
+    // Delete ONLY a positively identified not-found: the declared body carries
+    // _tag/name "SessionNotFoundError" (session.get declares 404 —
+    // packages/client/src/promise/generated/client.ts:633-642 — and declared()
+    // copies body fields onto the Error and sets name = _tag, same file at
+    // :2293-2297), its message, or an UnexpectedStatus ClientError whose cause
+    // carries status 404. Transport/5xx/malformed errors keep the key — an
+    // orphan is cheap, a wrongly deleted live session would lose its
+    // compression blocks. storage.scan exists on the context storage but not on
+    // our StateStore storage type, so scan via ctx.storage directly.
     const isSessionNotFoundError = (error: unknown): boolean => {
       if (!error || typeof error !== "object") return false;
       const e = error as {
@@ -377,15 +459,3 @@ type CatalogContextShim = {
   model?: { list(input?: unknown): Promise<unknown> };
   catalog?: { model?: { list(input?: unknown): Promise<unknown> } };
 };
-
-/**
- * Tool registration shape (`@opencode/plugin` promise API):
- * `tools.add(tool)` where the definition object carries `name`, `input`,
- * `description`, `execute` and registration `options`.
- */
-type AddableTools = { add: (definition: unknown) => void };
-
-function addTool(tools: AddableTools, definition: unknown): void {
-  if (typeof tools.add !== "function") return;
-  tools.add(definition);
-}

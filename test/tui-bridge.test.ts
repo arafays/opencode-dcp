@@ -8,6 +8,7 @@ import {
   buildStatsSnapshot,
   estimateTokens,
   measureMessagesChars,
+  measurePartChars,
   resolveTuiStateDirs,
   writeTuiStats,
   type CompressionEventRecord,
@@ -22,6 +23,9 @@ function tempRoot(): string {
     `dcp-tui-test-${process.pid}-${Math.random().toString(36).slice(2)}`,
   );
 }
+
+/** `MEDIA_TOKEN_ALLOWANCE.image` * `CHARS_PER_TOKEN`, for "is this priced as media?" checks. */
+const MEDIA_IMAGE_CHARS = 1_600 * 4;
 
 test("estimateTokens approximates chars/4", () => {
   assert.equal(estimateTokens(0), 0);
@@ -39,6 +43,103 @@ test("measureMessagesChars sums text sizes across message shapes", () => {
   assert.ok(chars >= 10);
   assert.equal(measureMessagesChars(undefined), 0);
   assert.equal(measureMessagesChars([]), 0);
+});
+
+/**
+ * A provider checkpoint (`CompactionPart` in packages/ai/src/schema/messages.ts)
+ * is billed as input on every request that replays it - either an `encrypted`
+ * blob (OpenAI Responses, packages/ai/src/protocols/open-responses.ts:677) or a
+ * replayed `text` summary (Anthropic, .../anthropic-messages.ts:922). It is
+ * not a media payload and not prunable text, so the generic field walk must
+ * price it: an uncharged part would under-report the window by the blob's size.
+ */
+test("a compaction checkpoint's encrypted blob is charged, not read as empty", () => {
+  const blob = "E".repeat(4_000);
+  const messages = [
+    {
+      role: "assistant",
+      content: [{ type: "compaction", provider: "openai.responses", id: "ckpt_1", encrypted: blob }],
+    },
+  ];
+  const chars = measureMessagesChars(messages);
+  const structural =
+    "assistant".length + "compaction".length + "openai.responses".length + "ckpt_1".length;
+  assert.equal(chars, structural + blob.length);
+  assert.ok(estimateTokens(chars) > 1_000);
+});
+
+test("a compaction checkpoint's replayed text summary is charged; a null summary costs only its fields", () => {
+  const summary = "s".repeat(2_000);
+  const withText = measureMessagesChars([
+    { role: "assistant", content: [{ type: "compaction", provider: "anthropic", text: summary }] },
+  ]);
+  assert.equal(
+    withText,
+    "assistant".length + "compaction".length + "anthropic".length + summary.length,
+  );
+
+  // `text: null` means the provider failed to produce a summary - there is no
+  // payload, so only the part's own fields are charged (never a media figure).
+  const failed = measureMessagesChars([
+    { role: "assistant", content: [{ type: "compaction", provider: "anthropic", text: null }] },
+  ]);
+  assert.equal(failed, "assistant".length + "compaction".length + "anthropic".length);
+  assert.ok(failed < MEDIA_IMAGE_CHARS);
+});
+
+test("an effort marker is measured as a few characters, never as media", () => {
+  const chars = measureMessagesChars([
+    { role: "system", content: [{ type: "effort", effort: "high", previous: "low" }] },
+  ]);
+  assert.equal(
+    chars,
+    "system".length + "effort".length + "high".length + "low".length,
+  );
+  assert.ok(chars < MEDIA_IMAGE_CHARS);
+});
+
+/**
+ * `measurePartChars` is the per-part form of `measureMessagesChars`, exported so
+ * `estimateCoveredTokens` (lib/prune-tool.ts) can price the part kinds with no
+ * model-visible text field - `compaction`, `media`, `effort` - instead of
+ * reporting zero for them. Two entry points over one pricing rule: a standalone
+ * part and the same part inside a message must cost the SAME, or the savings a
+ * prune reports would drift away from the estimate that produced the pressure
+ * warning (the two numbers sit on either side of one prune call).
+ */
+test("measurePartChars prices a part exactly as the transcript walk prices it", () => {
+  const parts = [
+    { type: "text", text: "plain text" },
+    { type: "reasoning", text: "reasoned" },
+    { type: "compaction", provider: "openai.responses", encrypted: "E".repeat(3_000) },
+    { type: "compaction", provider: "anthropic", text: null },
+    {
+      type: "media",
+      media: {
+        source: { type: "base64", data: "A".repeat(40_000), mediaType: "image/png" },
+        mediaType: "image/png",
+      },
+    },
+    { type: "effort", effort: "high", previous: "low" },
+  ];
+  for (const part of parts) {
+    const standalone = measurePartChars(part);
+    const inTranscript = measureMessagesChars([{ role: "assistant", content: [part] }]);
+    // The transcript walk charges the message's own `role` string on top, and
+    // nothing else: a single-part message costs `measurePartChars` plus that.
+    assert.equal(inTranscript, "assistant".length + standalone, JSON.stringify(part).slice(0, 60));
+  }
+
+  // The headline numbers stay honest through the exported entry point: a 3k
+  // checkpoint is ~750 tokens, an image is its flat allowance, and neither is
+  // the length of the base64 payload.
+  const image = parts[4]!;
+  assert.ok(estimateTokens(measurePartChars(image)) >= 1_600);
+  assert.ok(estimateTokens(measurePartChars(image)) < 1_700);
+  assert.equal(
+    estimateTokens(measurePartChars(parts[2]!)),
+    Math.round((3_000 + "compaction".length + "openai.responses".length) / 4),
+  );
 });
 
 test("buildStatsSnapshot records dispatch deltas and keeps other sessions", () => {

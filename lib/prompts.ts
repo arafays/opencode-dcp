@@ -92,3 +92,36 @@ ${stillOverBudget
 export const ITERATION_NUDGE = (messages: number) => `<dcp-system-reminder>
 ${messages} messages since the last user turn. If any completed work is no longer relevant to the current task, \`prune\` it.
 </dcp-system-reminder>`
+
+/**
+ * The human-readable opener `/dcp-prune` stores as its user turn (see
+ * `storedPruneMessage` in lib/commands.ts). Only a DEFAULT match target for the
+ * context hook's release test: the command pins its reminder to the exact stored
+ * line it produced, so a dispatch carrying that text is by definition the one
+ * that shows the model the user's request. The prefix alone would also match an
+ * EARLIER `/dcp-prune`'s still-visible stored turn and release the newer
+ * reminder early (see `takeManualPruneReminder` in lib/nudges.ts).
+ */
+export const PRUNE_REQUEST_PREFIX = "Prune this conversation now.";
+
+/**
+ * Manual-prune reminder, armed by `/dcp-prune` (lib/commands.ts) and consumed
+ * by the outbound dispatch that carries the command's stored turn.
+ * OUTBOUND-ONLY by
+ * construction: the command's STORED user message is plain prose, so this
+ * markup never enters session history (where it would render verbatim in the
+ * TUI).
+ *
+ * Unlike the pressure notes it carries no occupancy figure - the user asked,
+ * they did not report a number - and says so, so the model does not go looking
+ * for a measurement to justify the call. Same one-pass/no-deliberation shape as
+ * `CONTEXT_LIMIT_NUDGE`, for the same reason: the summary is the work.
+ *
+ * `escapedFocus` must already be `JSON.stringify`ed by the caller: the focus
+ * sits in a double-quoted slot, and a raw quote or newline in user input would
+ * otherwise break out of it.
+ */
+export const MANUAL_PRUNE_REMINDER = (escapedFocus: string) => `<dcp-system-reminder>
+Manual prune requested by the user: immediately call the \`prune\` tool on the largest CLOSED section of this conversation, dropping completed work irrelevant to the current task. User focus (may be empty): ${escapedFocus}
+This is an explicit request, not a pressure estimate - no occupancy figure is attached and none is needed. Decide in one pass over the boundary IDs, oldest first; batch every qualifying range into a single \`prune\` call (3-5 word topic, summaries as usual). If nothing qualifies, say so in one line and continue with the current task.
+</dcp-system-reminder>`

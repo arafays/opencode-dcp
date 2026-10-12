@@ -4,7 +4,7 @@ import { formatMessageIdTag } from "./refs"
 import { activeBlocks, TAIL_ANCHOR } from "./state/store"
 import type { SessionState } from "./state/types"
 import { createSyntheticBlockMessage, mapTextParts, stripHallucinatedTags, withToolInputReplaced, withToolResultReplaced } from "./transcript/edit"
-import { makeToolResultReplacement, type WireMessage } from "./types"
+import { makeToolResultReplacement, qualifiedToolName, type WireMessage } from "./types"
 
 const PRUNED_TOOL_OUTPUT_REPLACEMENT =
   "[Output removed to save context - information superseded or no longer needed]"
@@ -26,10 +26,16 @@ export function pruneToolOutputs(
   if (prunedIds.length === 0) return
   const prunedSet = new Set(prunedIds)
   const alwaysProtected = new Set([...ALWAYS_PROTECTED_TOOLS])
-  const isProtectedName = (name: string | undefined): boolean => {
-    const normalized = (name ?? "").toLowerCase()
-    if (alwaysProtected.has(normalized)) return true
-    return config.protectedTools.some((pattern) => matchesGlob(pattern, normalized))
+  // User globs match on the name the MODEL sees (the namespace-qualified form),
+  // so a `namespace_*` glob still covers a namespaced tool and a bare leaf name
+  // cannot slip past one. The unconditional built-in safety net is matched on
+  // BOTH spellings: a namespaced tool that reuses a built-in leaf name (e.g. an
+  // MCP `write`) must stay protected even though its qualified name differs.
+  const isProtectedName = (part: { name: string; namespace?: string } | undefined): boolean => {
+    const leaf = (part?.name ?? "").toLowerCase()
+    const qualified = qualifiedToolName(part?.name ?? "", part?.namespace).toLowerCase()
+    if (alwaysProtected.has(qualified) || alwaysProtected.has(leaf)) return true
+    return config.protectedTools.some((pattern) => matchesGlob(pattern, qualified))
   }
 
   for (let i = 0; i < messages.length; i++) {
@@ -41,8 +47,7 @@ export function pruneToolOutputs(
       if (part.type !== "tool-result") continue
       if (!prunedSet.has(part.id)) continue
       if (part.result.type !== "error") continue
-      const callName = part.name
-      if (isProtectedName(callName)) continue
+      if (isProtectedName(part)) continue
       // Find the matching assistant tool-call input and scrub strings.
       for (let j = i - 1; j >= 0; j--) {
         const candidate = messages[j]
@@ -72,7 +77,7 @@ export function pruneToolOutputs(
     for (const part of message.content) {
       if (part.type !== "tool-result") continue
       if (!prunedSet.has(part.id)) continue
-      if (isProtectedName(part.name)) continue
+      if (isProtectedName(part)) continue
       next = withToolResultReplaced(next, part.id, makeToolResultReplacement(PRUNED_TOOL_OUTPUT_REPLACEMENT))
     }
     if (next !== message) messages[i] = next

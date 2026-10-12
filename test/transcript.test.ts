@@ -169,3 +169,212 @@ test("scanTranscript records errored and pending calls", () => {
   assert.equal(pending.index, -1);
   assert.equal(pending.turn, 3); // turnCount + 1
 });
+
+/**
+ * A namespaced tool (MCP, `packages/core/src/tool/mcp.ts`) arrives either with
+ * the namespace already flattened into `name` (`effectiveName`,
+ * packages/core/src/tool/runtime.ts:278) or, on a route that keeps namespaces
+ * natively, as a leaf `name` plus `namespace`. Either way the index must key
+ * tools by the same joined spelling the model is shown
+ * (`qualifiedToolName`, mirroring `flattenToolRequest`,
+ * packages/ai/src/protocols/shared.ts:308) - otherwise two tools sharing a leaf
+ * name are indistinguishable and name-based protection/dedupe mis-fires.
+ */
+test("scanTranscript indexes namespaced tools under their qualified name", () => {
+  const index = scanTranscript([
+    { id: "u1", role: "user", content: [{ type: "text", text: "search" }] },
+    {
+      id: "a1",
+      role: "assistant",
+      content: [
+        { type: "tool-call", id: "c1", name: "search", namespace: "github", input: { q: "dcp" } },
+      ],
+    },
+    {
+      id: "t1",
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          id: "c1",
+          name: "search",
+          namespace: "github",
+          result: { type: "text", value: "hits" },
+        },
+      ],
+    },
+  ]);
+  const call = index.tools.get("c1")!;
+  assert.equal(call.name, "github_search");
+  assert.equal(call.hasResult, true);
+});
+
+test("two same-named tools in different namespaces keep distinct identities", () => {
+  const index = scanTranscript([
+    {
+      id: "a1",
+      role: "assistant",
+      content: [
+        { type: "tool-call", id: "c1", name: "search", namespace: "github", input: { q: "dcp" } },
+        { type: "tool-call", id: "c2", name: "search", namespace: "linear", input: { q: "dcp" } },
+      ],
+    },
+    {
+      id: "t1",
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          id: "c1",
+          name: "search",
+          namespace: "github",
+          result: { type: "text", value: "github hits" },
+        },
+      ],
+    },
+    {
+      id: "t2",
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          id: "c2",
+          name: "search",
+          namespace: "linear",
+          result: { type: "text", value: "linear hits" },
+        },
+      ],
+    },
+  ]);
+  assert.equal(index.tools.get("c1")!.name, "github_search");
+  assert.equal(index.tools.get("c2")!.name, "linear_search");
+  // Same input, different namespace: a dedupe signature over name+input must
+  // not group them, or one server's result is pruned as a duplicate of the other.
+  const signatures = ["c1", "c2"].map((id) => `${index.tools.get(id)!.name}`);
+  assert.deepEqual(new Set(signatures).size, 2);
+});
+
+/**
+ * Core emits `[call, result]` inside the ASSISTANT message for a
+ * provider-executed tool and the protocol replays the result as a hosted item
+ * while dropping the call (packages/ai/src/session/runner/to-llm-message.ts:180-200,
+ * packages/ai/src/protocols/open-responses.ts:700-728). The text must be
+ * measured - a compression covering it is charged for what it removes - but it
+ * must never look prunable: `pruneToolOutputs` only rewrites `role:"tool"`
+ * messages, so a prunable flag here would report savings that never happen.
+ */
+test("a provider-executed result is measured but never marked prunable", () => {
+  const index = scanTranscript([
+    { id: "u1", role: "user", content: [{ type: "text", text: "look it up" }] },
+    {
+      id: "a1",
+      role: "assistant",
+      content: [
+        {
+          type: "tool-call",
+          id: "c1",
+          name: "google_search",
+          input: { q: "dcp" },
+          providerExecuted: true,
+        },
+        {
+          type: "tool-result",
+          id: "c1",
+          name: "google_search",
+          result: { type: "text", value: "a very large search result blob" },
+          providerExecuted: true,
+        },
+      ],
+    },
+  ]);
+  const call = index.tools.get("c1")!;
+  assert.equal(call.providerExecuted, true);
+  assert.equal(call.outputText, "a very large search result blob");
+  // Not prunable: no `role:"tool"` message exists to rewrite.
+  assert.equal(call.hasResult, false);
+  assert.equal(call.key, "");
+  assert.equal(call.index, -1);
+});
+
+test("a provider-executed error result is reported as an error, still unprunable", () => {
+  const index = scanTranscript([
+    {
+      id: "a1",
+      role: "assistant",
+      content: [
+        { type: "tool-call", id: "c1", name: "google_search", input: {}, providerExecuted: true },
+        {
+          type: "tool-result",
+          id: "c1",
+          name: "google_search",
+          result: { type: "error", value: "quota" },
+          providerExecuted: true,
+        },
+      ],
+    },
+  ]);
+  const call = index.tools.get("c1")!;
+  assert.equal(call.isError, true);
+  assert.equal(call.hasResult, false);
+  // `toolResultToText` JSON-encodes a non-string error value.
+  assert.equal(call.outputText, '"quota"');
+});
+
+test("a provider-executed result stays unprunable even in a tool message", () => {
+  const index = scanTranscript([
+    {
+      id: "a1",
+      role: "assistant",
+      content: [
+        { type: "tool-call", id: "c1", name: "google_search", input: {}, providerExecuted: true },
+      ],
+    },
+    {
+      id: "t1",
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          id: "c1",
+          name: "google_search",
+          result: { type: "text", value: "hosted result" },
+          providerExecuted: true,
+        },
+      ],
+    },
+  ]);
+  const call = index.tools.get("c1")!;
+  assert.equal(call.providerExecuted, true);
+  assert.equal(call.hasResult, false);
+  assert.equal(call.outputText, "hosted result");
+});
+
+/**
+ * `CompactionPart`/`EffortPart` (packages/ai/src/schema/messages.ts:196-230)
+ * are provider markers, never tool output: they must not be indexed as a tool
+ * result, must not disturb message keys, and must not be mistaken for media.
+ */
+test("compaction and effort parts are ignored by the tool index", () => {
+  const messages: WireMessage[] = [
+    { id: "u1", role: "user", content: [{ type: "text", text: "go" }] },
+    { role: "system", content: [{ type: "effort", effort: "high", previous: "low" }] },
+    {
+      id: "a1",
+      role: "assistant",
+      content: [
+        { type: "tool-call", id: "c1", name: "read", input: {} },
+        { type: "compaction", provider: "anthropic", text: "earlier conversation summary" },
+        { type: "text", text: "done" },
+      ],
+    },
+    toolResult("t1", "c1", "read", { type: "text", value: "data" }),
+  ];
+  const index = scanTranscript(messages);
+  assert.equal(index.keys[1], "system#1");
+  assert.equal(index.tools.size, 1);
+  assert.equal(index.tools.get("c1")!.outputText, "data");
+  // The compaction payload is not attributed to the tool.
+  assert.ok(!index.tools.get("c1")!.outputText.includes("earlier conversation"));
+  // An effort-only system message is not a user turn.
+  assert.equal(index.turnCount, 1);
+});

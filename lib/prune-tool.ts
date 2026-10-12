@@ -18,7 +18,12 @@ import { countTokens } from "./tokens";
 import type { TranscriptIndex } from "./transcript/scan";
 import type { TranscriptMirror } from "./transcript/mirror";
 import { deduplicate, purgeErrors } from "./strategies";
-import { MAX_RECENT_COMPRESSIONS, type CompressionEventRecord } from "./tui-bridge";
+import {
+  estimateTokens,
+  MAX_RECENT_COMPRESSIONS,
+  measurePartChars,
+  type CompressionEventRecord,
+} from "./tui-bridge";
 
 /**
  * The model-driven `prune` tool (named to avoid clashing with the platform's
@@ -36,6 +41,81 @@ import { MAX_RECENT_COMPRESSIONS, type CompressionEventRecord } from "./tui-brid
  */
 
 export const PRUNE_TOOL_NAME = "prune";
+
+/**
+ * The subset of `ToolEditor` (`@opencode/plugin` promise API) the registration
+ * path touches. `add` and `list` are both optional so a runtime predating
+ * either still registers: a missing `add` is reported, a missing `list` only
+ * means the tool is registered without its presence ever being confirmed.
+ */
+export interface PruneToolEditor {
+  readonly add?: (definition: unknown) => void;
+  readonly list?: () => readonly unknown[];
+}
+
+export type PruneToolRegistration =
+  /** `add` ran and `prune` is present in the editor's own registry listing. */
+  | { readonly ok: true }
+  /** `add` is absent, or the registry refused the definition and dropped it. */
+  | { readonly ok: false; readonly reason: string };
+
+/**
+ * True when `prune` appears in a tool listing — `ToolEditor.list()` (the draft
+ * the transform writes into) or `ToolDomain.list()` (the committed registry).
+ *
+ * Entries are matched on the raw `name` and on the registry's `id` (core's
+ * `effectiveName`: the name run through `normalizedName`, prefixed with the
+ * namespace when `options.namespace` is set), so the check holds whichever key
+ * a runtime stamps. A listing that is not an array counts as "absent": the
+ * caller treats absence as a registration failure, and a malformed listing is
+ * not evidence the tool is reachable.
+ */
+export function pruneToolRegistered(tools: unknown): boolean {
+  if (!Array.isArray(tools)) return false;
+  return tools.some((entry) => {
+    if (typeof entry !== "object" || entry === null) return false;
+    const { name, id } = entry as { name?: unknown; id?: unknown };
+    return name === PRUNE_TOOL_NAME || id === PRUNE_TOOL_NAME;
+  });
+}
+
+/**
+ * Registers the `prune` definition and reports whether the registry kept it.
+ *
+ * Core's editor `add` DROPS a definition that fails `registrationError` -
+ * invalid name, the reserved `execute` id, or a schema `ToolDefinition.make`
+ * rejects - recording a `RegistrationError` and returning without inserting
+ * (packages/core/src/tool.ts:177-185). The only other trace is an
+ * `Effect.logError` in the domain's `notify`
+ * (packages/core/src/tool.ts:206-218), which never reaches the plugin. So a
+ * rejected registration used to be invisible from here while the DCP system
+ * prompt kept advertising `prune`, and every call failed with core's generic
+ * 'No tool named "prune" is currently available'.
+ *
+ * `editor.list()` reads the same draft map `add` writes, so the check is a
+ * local array read — no I/O, safe to run on every transform pass (registration
+ * and reloads, never a dispatch).
+ */
+export function addPruneTool(
+  editor: PruneToolEditor,
+  definition: ReturnType<typeof pruneToolDefinition>,
+): PruneToolRegistration {
+  if (typeof editor.add !== "function") {
+    return {
+      ok: false,
+      reason:
+        "the tool editor exposes no `add()`; the `prune` tool was never registered while the system prompt still advertises it",
+    };
+  }
+  editor.add(definition);
+  if (typeof editor.list !== "function") return { ok: true };
+  if (pruneToolRegistered(editor.list())) return { ok: true };
+  return {
+    ok: false,
+    reason:
+      "the runtime rejected the `prune` definition and dropped it from the tool registry (invalid name, reserved `execute` id, or an unusable input schema); the system prompt still advertises a tool that can never be called",
+  };
+}
 
 /**
  * The zero-gain floor (`ZERO_GAIN_MIN_TOKENS`,
@@ -134,10 +214,22 @@ export function pruneToolDefinition(deps: PruneDeps) {
     // `codemode: true`/unset hides the tool inside the Code Mode `execute`
     // catalog, whose descriptions are truncated to 120 chars - too short for
     // the PRUNE_RANGE boundary rules every piece of DCP model copy tells the
-    // model to follow. The permission is pinned to the tool's own name (core's
-    // whollyDisabled falls back to `tool.options?.permission ?? name`) so the
-    // action stays stable regardless of the platform default.
-    options: { codemode: false, permission: "prune" },
+    // model to follow. The split is `codemode === false` vs `!== false`, not
+    // "explicit true", so leaving it unset is as bad as setting it true
+    // (packages/core/src/tool.ts:234-235; the definitions list at :257-261).
+    // The permission is pinned to the tool's own name (core's whollyDisabled
+    // falls back to `tool.options?.permission ?? name`, packages/core/src/
+    // tool.ts:231), so the action stays stable regardless of the platform
+    // default; permission actions are free-form strings matched by wildcard,
+    // so "prune" is a valid action and needs no registration of its own.
+    //
+    // This satisfies `Tool.Options` (packages/schema/src/tool.ts:32-42): the
+    // `codemode: boolean` arm, which forbids `pinned`. `prune` is not
+    // reserved - `registrationError` reserves only the `execute` id, and only
+    // for `codemode === false` registrations (packages/core/src/tool.ts:
+    // 311-314). `name` also passes the `/^[A-Za-z0-9_-]+$/` check on the same
+    // path, which is what `addPruneTool`'s post-add verification proves.
+    options: { codemode: false, permission: PRUNE_TOOL_NAME },
     execute: async (input: unknown, context: PruneToolContext) => {
       // Expected failures are THROWN, never returned as model-visible success
       // content. The platform frames a thrown error as a real tool failure
@@ -604,6 +696,25 @@ export function stripBlockWrapper(block: CompressionBlock): string {
     .trim();
 }
 
+/**
+ * Tokens a covered range reclaims - the figure behind both the zero-gain guard
+ * and the savings the tool reports back to the model.
+ *
+ * The four explicit branches measure WHAT THE MODEL SEES, and must keep doing
+ * so: a tool result is charged the indexed `outputText`, never the raw result
+ * envelope, because the envelope is not what leaves the outbound transcript.
+ *
+ * Every other `ContentPart` variant carries no such string - `compaction`
+ * (a provider checkpoint, billed as input on every following request), `media`
+ * (paid for by geometry, not by encoded length) and `effort` (a marker) - so
+ * they fall through to the SAME {@link measurePartChars} walk the context
+ * estimate uses. Priced separately they read as zero: a range covering a large
+ * checkpoint blob was reported as freeing nothing and could be refused as "not
+ * worth compressing", while the model was told a smaller saving than it got.
+ *
+ * Cheap by construction: the walk reads field lengths, never the payload, so a
+ * multi-megabyte `encrypted` blob costs one `.length`.
+ */
 function estimateCoveredTokens(index: TranscriptIndex, coveredKeys: string[]): number {
   const coveredSet = new Set(coveredKeys);
   let total = 0;
@@ -615,6 +726,7 @@ function estimateCoveredTokens(index: TranscriptIndex, coveredKeys: string[]): n
       else if (part.type === "tool-result")
         total += countTokens(index.tools.get(part.id)?.outputText ?? "");
       else if (part.type === "tool-call") total += countTokens(safeJson(part.input));
+      else total += estimateTokens(measurePartChars(part));
     }
   }
   return total;

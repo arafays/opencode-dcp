@@ -65,6 +65,168 @@ test("pruneToolOutputs never touches protected tools", () => {
   assert.equal((messages2[0]!.content[0] as ToolResultPart).result.type, "json");
 });
 
+test("pruneToolOutputs matches protection globs against the namespace-qualified name", () => {
+  // MCP tools carry `namespace`; the model is shown `<namespace>_<name>`
+  // (core's effectiveName, packages/core/src/tool/runtime.ts:278). A glob
+  // written for that spelling must still protect the output when the wire form
+  // keeps the leaf name plus an explicit namespace.
+  const state = createSessionState("s");
+  state.prunedTools = { m1: 30, m2: 30 };
+  const messages: WireMessage[] = [
+    {
+      id: "t1",
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          id: "m1",
+          name: "search",
+          namespace: "github",
+          result: { type: "json", value: { ok: true } },
+        },
+      ],
+    },
+    {
+      id: "t2",
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          id: "m2",
+          name: "search",
+          namespace: "linear",
+          result: { type: "json", value: { ok: true } },
+        },
+      ],
+    },
+  ];
+  const scoped = resolveOptions({ protectedTools: ["github_*"] }, () => {});
+  pruneToolOutputs(state, messages, scoped);
+  assert.equal((messages[0]!.content[0] as ToolResultPart).result.type, "json");
+  assert.equal((messages[1]!.content[0] as ToolResultPart).result.type, "text");
+});
+
+test("pruneToolOutputs protects a namespaced tool that reuses an always-protected leaf name", () => {
+  // `ALWAYS_PROTECTED_TOOLS` is unconditional, so a namespaced tool whose leaf
+  // name is a built-in (`write` -> `fs_write`) must stay protected even though
+  // its qualified name no longer equals the built-in. User globs keep matching
+  // the qualified name.
+  const state = createSessionState("s");
+  state.prunedTools = { m1: 30 };
+  const messages: WireMessage[] = [
+    {
+      id: "t1",
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          id: "m1",
+          name: "write",
+          namespace: "fs",
+          result: { type: "json", value: { ok: true } },
+        },
+      ],
+    },
+  ];
+  pruneToolOutputs(state, messages, CONFIG);
+  assert.equal((messages[0]!.content[0] as ToolResultPart).result.type, "json");
+
+  // A user glob still matches the model-visible qualified name.
+  const globbed = resolveOptions({ protectedTools: ["fs_*"] }, () => {});
+  const state2 = createSessionState("s2");
+  state2.prunedTools = { m2: 30 };
+  const messages2: WireMessage[] = [
+    {
+      id: "t2",
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          id: "m2",
+          name: "read",
+          namespace: "fs",
+          result: { type: "json", value: { ok: true } },
+        },
+      ],
+    },
+  ];
+  pruneToolOutputs(state2, messages2, globbed);
+  assert.equal((messages2[0]!.content[0] as ToolResultPart).result.type, "json");
+});
+
+test("pruneToolOutputs protects a namespaced call whose error input would otherwise be scrubbed", () => {
+  const state = createSessionState("s");
+  state.prunedTools = { m1: 30 };
+  const messages: WireMessage[] = [
+    {
+      id: "a1",
+      role: "assistant",
+      content: [
+        {
+          type: "tool-call",
+          id: "m1",
+          name: "search",
+          namespace: "github",
+          input: { q: "secret" },
+        },
+      ],
+    },
+    {
+      id: "t1",
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          id: "m1",
+          name: "search",
+          namespace: "github",
+          result: { type: "error", value: { message: "boom" } },
+        },
+      ],
+    },
+  ];
+  const scoped = resolveOptions({ protectedTools: ["github_*"] }, () => {});
+  pruneToolOutputs(state, messages, scoped);
+  const call = messages[0]!.content[0] as { input: Record<string, unknown> };
+  assert.equal(call.input.q, "secret");
+  assert.equal((messages[1]!.content[0] as ToolResultPart).result.type, "error");
+});
+
+test("pruneToolOutputs leaves provider state on the replaced result part intact", () => {
+  // `withToolResultReplaced` is copy-on-write: the part's providerMetadata /
+  // metadata / namespace survive the swap, because the platform replays them
+  // and DCP never rebuilds a part from scratch.
+  const state = createSessionState("s");
+  state.prunedTools = { c1: 120 };
+  const messages: WireMessage[] = [
+    {
+      id: "t1",
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          id: "c1",
+          name: "read",
+          namespace: "fs",
+          providerMetadata: { anthropic: { itemId: "msg_1" } },
+          metadata: { source: "plugin" },
+          result: { type: "text", value: "raw output" },
+        },
+      ],
+      providerMetadata: { anthropic: { thought: "sig" } },
+      native: { x: 1 },
+    },
+  ];
+  pruneToolOutputs(state, messages, CONFIG);
+  const part = messages[0]!.content[0] as ToolResultPart;
+  assert.deepEqual(part.result, { type: "text", value: PRUNED_PLACEHOLDER });
+  assert.deepEqual(part.providerMetadata, { anthropic: { itemId: "msg_1" } });
+  assert.deepEqual(part.metadata, { source: "plugin" });
+  assert.equal(part.namespace, "fs");
+  assert.deepEqual(messages[0]!.providerMetadata, { anthropic: { thought: "sig" } });
+  assert.deepEqual(messages[0]!.native, { x: 1 });
+});
+
 test("pruneToolOutputs blanks inputs of pruned errored calls", () => {
   const state = createSessionState("s");
   state.prunedTools = { c9: 10 };
