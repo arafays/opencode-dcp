@@ -11,7 +11,8 @@ import {
 } from "../lib/prune-tool";
 import { resolveOptions } from "../lib/config";
 import { createLogger } from "../lib/logger";
-import { StateStore, type JsonStorage } from "../lib/state/store";
+import { applyCompression, StateStore, type JsonStorage } from "../lib/state/store";
+import { applyCompressionBlocks } from "../lib/prune";
 import { TranscriptMirror } from "../lib/transcript/mirror";
 import { scanTranscript, type TranscriptIndex } from "../lib/transcript/scan";
 import { countTokens } from "../lib/tokens";
@@ -579,7 +580,7 @@ test("the zero-gain floor is half the standing summary, just under and just over
   assert.equal(over.runtime.state.blocks["2"]!.summaryTokens, 185);
 });
 
-test("the zero-gain floor has an absolute minimum for small blocks", async () => {
+test("small placeholder-free drops bypass the absolute floor, but not the half-size guard", async () => {
   const seed = async (standingTokens: number) => {
     const { store, index, run } = harness();
     const runtime = await store.ensure(SESSION);
@@ -592,20 +593,26 @@ test("the zero-gain floor has an absolute minimum for small blocks", async () =>
     return { store, run, runtime };
   };
 
-  // A 160-token block: half of it is only 80, but a turn that frees 120 tokens
-  // costs more than it frees, so the floor stays at ZERO_GAIN_MIN_TOKENS.
   assert.equal(ZERO_GAIN_MIN_TOKENS, 128);
-  const under = await seed(160);
+  const under = await seed(106);
   await assert.rejects(
     under.run({
-      topic: "Small fold",
-      content: [{ startId: "b1", endId: "b1", summary: summaryOfTokens(40) }],
+      topic: "Small re-summary",
+      content: [{ startId: "b1", endId: "b1", summary: summaryOfTokens(60) }],
     }),
-    /frees 120 of the 128-token minimum/,
+    /frees 46 of the 53-token minimum/,
   );
 
-  // Dropping it for a ~25-token one-liner frees 135 and is accepted.
-  const over = await seed(160);
+  await assert.rejects(
+    under.run({
+      topic: "Retained placeholder",
+      content: [{ startId: "b1", endId: "b1", summary: "(b1)" }],
+    }),
+    /frees 0 of the 128-token minimum/,
+  );
+
+  // The real-session 106-token stale block can now be dropped for a one-liner.
+  const over = await seed(106);
   const accepted = await over.run({
     topic: "Small drop",
     content: [{ startId: "b1", endId: "b1", summary: "keep" }],
@@ -613,6 +620,267 @@ test("the zero-gain floor has an absolute minimum for small blocks", async () =>
   assert.match(String(accepted.content), /^Re-summarized already-compressed content/);
   assert.equal(over.runtime.state.blocks["2"]!.summaryTokens, countTokens("[Compressed conversation section]\nkeep\n<dcp-message-id>b2</dcp-message-id>"));
   assert.equal(over.runtime.state.blocks["1"]!.active, false);
+
+  const noGain = await seed(20);
+  await assert.rejects(
+    noGain.run({
+      topic: "No actual saving",
+      content: [{ startId: "b1", endId: "b1", summary: summaryOfTokens(20) }],
+    }),
+    /frees 0 of the 128-token minimum/,
+  );
+});
+
+test("parallel overlapping prunes reject the second call without poisoning the queue", async () => {
+  const failures: Array<Record<string, unknown> | undefined> = [];
+  const { store, index, run } = harness({
+    logger: { debug: () => {}, warn: (_message, data) => failures.push(data) },
+  });
+  const runtime = await store.ensure(SESSION);
+  runtime.refs.project(index.keys);
+  const input = {
+    topic: "Concurrent range",
+    content: [{ startId: "m0001", endId: "m0003", summary: "old findings" }],
+  };
+  const results = await Promise.allSettled([run(input), run(input)]);
+  assert.equal(results[0]!.status, "fulfilled");
+  assert.equal(results[1]!.status, "rejected");
+  assert.deepEqual(runtime.state.activeBlockIds, [1]);
+  assert.equal(failures.length, 1);
+  assert.match(String(failures[0]?.error), /startId m0001 does not exist/);
+  await run({
+    topic: "After failure",
+    content: [{ startId: "m0006", endId: "m0008", summary: "new findings" }],
+  });
+  assert.deepEqual(runtime.state.activeBlockIds, [1, 2]);
+});
+
+test("parallel disjoint prunes wait for persistence before validating the next call", async () => {
+  let release!: () => void;
+  let entered!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  const persisting = new Promise<void>((resolve) => { entered = resolve; });
+  let writes = 0;
+  const storage: JsonStorage = {
+    get: async () => undefined,
+    remove: async () => {},
+    set: async () => {
+      if (++writes === 1) {
+        entered();
+        await blocked;
+      }
+    },
+  };
+  const { store, index, run } = harness({}, fixture(), storage);
+  const runtime = await store.ensure(SESSION);
+  runtime.refs.project(index.keys);
+  const first = run({
+    topic: "First call",
+    content: [{ startId: "m0001", endId: "m0003", summary: "first findings" }],
+  });
+  const second = run({
+    topic: "Second call",
+    content: [{ startId: "m0006", endId: "m0008", summary: "second findings" }],
+  });
+  await persisting;
+  try {
+    assert.equal(runtime.state.stats.compressRuns, 1);
+    assert.equal(runtime.refs.keyOf("m0006"), "id:u2");
+  } finally {
+    release();
+  }
+  await Promise.all([first, second]);
+  assert.equal(writes, 2);
+  assert.deepEqual(runtime.state.activeBlockIds, [1, 2]);
+});
+
+test("ranges that overlap after tool-pair expansion abort before applying any block", async () => {
+  const { store, index, run } = harness();
+  const runtime = await store.ensure(SESSION);
+  runtime.refs.project(index.keys);
+  const before = JSON.stringify(runtime.state);
+  await assert.rejects(run({
+    topic: "Expanded overlap",
+    content: [
+      { startId: "m0001", endId: "m0002", summary: "assistant batch" },
+      { startId: "m0003", endId: "m0003", summary: "result batch" },
+    ],
+  }), /ranges overlap/);
+  assert.equal(JSON.stringify(runtime.state), before);
+});
+
+test("raw ranges leave a preceding block intact, but consume blocks contained in the range", async () => {
+  for (const contained of [false, true]) {
+    const { store, index, run } = harness();
+    const runtime = await store.ensure(SESSION);
+    runtime.refs.project(index.keys);
+    await run({
+      topic: "Keep constraint",
+      content: [{ startId: "m0002", endId: "m0003", summary: "important old constraint" }],
+    });
+    await run({
+      topic: "Following findings",
+      content: [{ startId: contained ? "m0001" : "m0004", endId: "m0005", summary: "new findings" }],
+    });
+    assert.equal(runtime.state.blocks["1"]!.active, !contained);
+    assert.deepEqual(runtime.state.blocks["2"]!.consumedBlockIds, contained ? [1] : []);
+  }
+});
+
+test("shared block ranges reject atomically and inactive block boundaries cannot be reused", async () => {
+  const { store, index, run } = harness();
+  const runtime = await store.ensure(SESSION);
+  runtime.refs.project(index.keys);
+  await run({
+    topic: "Old findings",
+    content: [{ startId: "m0001", endId: "m0003", summary: summaryOfTokens(320) }],
+  });
+  const before = JSON.stringify(runtime.state);
+  await assert.rejects(run({
+    topic: "Shared block",
+    content: [
+      { startId: "b1", endId: "b1", summary: "dropped" },
+      { startId: "b1", endId: "m0006", summary: "new findings" },
+    ],
+  }), /ranges overlap/);
+  assert.equal(JSON.stringify(runtime.state), before);
+  await run({ topic: "Drop block", content: [{ startId: "b1", endId: "b1", summary: "dropped" }] });
+  await assert.rejects(run({
+    topic: "Stale boundary",
+    content: [{ startId: "b1", endId: "m0006", summary: "stale" }],
+  }), /startId b1 references an inactive compressed block/);
+  await assert.rejects(run({
+    topic: "Stale end boundary",
+    content: [{ startId: "b2", endId: "b1", summary: "stale" }],
+  }), /endId b1 references an inactive compressed block/);
+});
+
+test("mixed boundaries follow visible block positions, not hidden coverage or expanded anchors", async () => {
+  const cases = [
+    { startId: "m0001", endId: "b1", consumed: [1], order: ["b3", "u3", "u4", "u5", "u6", "b2", "u7", "u9"] },
+    { startId: "b1", endId: "m0005", consumed: [1], order: ["u0", "b3", "u5", "u6", "b2", "u7", "u9"] },
+    { startId: "b1", endId: "b1", consumed: [1], order: ["u0", "b3", "u3", "u4", "u5", "u6", "b2", "u7", "u9"] },
+    { startId: "b1", endId: "b2", consumed: [1, 2], order: ["u0", "b3", "u7", "u9"] },
+    { startId: "b2", endId: "m0008", consumed: [2], order: ["u0", "b1", "u3", "u4", "u5", "u6", "b3", "u9"] },
+    { startId: "m0004", endId: "b2", consumed: [2], order: ["u0", "b1", "b3", "u7", "u9"] },
+    { startId: "m0004", endId: "b1", consumed: [], order: [] },
+    { startId: "b2", endId: "b1", consumed: [], order: [] },
+  ];
+  for (const entry of cases) {
+    const messages: WireMessage[] = Array.from({ length: 10 }, (_, i) => ({
+      id: `u${i}`, role: "user", content: [{ type: "text", text: `message ${i}` }],
+    }));
+    const { store, index, run } = harness({}, messages);
+    const runtime = await store.ensure(SESSION);
+    runtime.refs.project(index.keys);
+    // Persisted coverage need not match summary positions: b1 covers u8 beyond b2's anchor.
+    for (const block of [
+      { coveredKeys: ["id:u1", "id:u8"], anchorKey: "id:u3" },
+      { coveredKeys: ["id:u2"], anchorKey: "id:u7" },
+    ]) {
+      applyCompression({
+        state: runtime.state, refs: runtime.refs, topic: "Stored block",
+        summary: summaryOfTokens(320), coveredToolIds: [], coveredTokens: 500,
+        consumedBlockIds: [], ...block,
+      });
+    }
+    const input = { topic: "Mixed range", content: [{ startId: entry.startId, endId: entry.endId, summary: "closed findings" }] };
+    if (entry.consumed.length === 0) {
+      const before = JSON.stringify(runtime.state);
+      await assert.rejects(run(input), /appears after endId/);
+      assert.equal(JSON.stringify(runtime.state), before);
+      continue;
+    }
+    await run(input);
+    assert.deepEqual(runtime.state.blocks["3"]!.consumedBlockIds, entry.consumed);
+    const outbound = [...messages];
+    applyCompressionBlocks(runtime.state, outbound, index.keys);
+    const order = outbound.map((message) => message.id ?? message.content
+      .filter((part) => part.type === "text")
+      .map((part) => /<dcp-message-id>(b\d+)<\/dcp-message-id>/.exec(part.text)?.[1])[0]);
+    assert.deepEqual(order, entry.order, `${entry.startId}..${entry.endId}`);
+  }
+});
+
+test("independent shared-anchor replacements retain their visible order in either batch order", async () => {
+  for (const reverse of [false, true]) {
+    const messages: WireMessage[] = Array.from({ length: 4 }, (_, i) => ({
+      id: `u${i}`, role: "user", content: [{ type: "text", text: `message ${i}` }],
+    }));
+    const { store, index, run } = harness({}, messages);
+    const runtime = await store.ensure(SESSION);
+    runtime.refs.project(index.keys);
+    for (let i = 0; i < 3; i++) {
+      applyCompression({
+        state: runtime.state, refs: runtime.refs, topic: "Stored block",
+        summary: summaryOfTokens(320), coveredKeys: [`id:u${i}`], coveredToolIds: [],
+        coveredTokens: 500, consumedBlockIds: [], anchorKey: "id:u3",
+      });
+    }
+    const ranges = [1, 3].map((id) => ({ startId: `b${id}`, endId: `b${id}`, summary: `replacement ${id}` }));
+    await run({ topic: "Independent replacements", content: reverse ? ranges.reverse() : ranges });
+    const outbound = [...messages];
+    applyCompressionBlocks(runtime.state, outbound, index.keys);
+    assert.deepEqual(outbound.map((message) => message.id ?? message.content
+      .filter((part) => part.type === "text")
+      .map((part) => /<dcp-message-id>(b\d+)<\/dcp-message-id>/.exec(part.text)?.[1])[0]),
+    reverse ? ["b5", "b2", "b4", "u3"] : ["b4", "b2", "b5", "u3"]);
+    assert.equal(runtime.state.blocks["2"]!.active, true);
+  }
+});
+
+test("blocks with missing original keys are consumed only when their visible summary is selected", async () => {
+  const { store, index, run } = harness();
+  const runtime = await store.ensure(SESSION);
+  runtime.refs.project(index.keys);
+  applyCompression({
+    state: runtime.state, refs: runtime.refs, topic: "Orphaned coverage",
+    summary: summaryOfTokens(320), coveredKeys: ["id:missing"], coveredToolIds: [],
+    coveredTokens: 500, consumedBlockIds: [], anchorKey: "id:u2",
+  });
+  await run({ topic: "Raw range", content: [{ startId: "m0001", endId: "m0003", summary: "old findings" }] });
+  assert.equal(runtime.state.blocks["1"]!.active, true);
+  assert.deepEqual(runtime.state.blocks["2"]!.consumedBlockIds, []);
+  await run({ topic: "Explicit orphan drop", content: [{ startId: "b1", endId: "b1", summary: "dropped" }] });
+  assert.equal(runtime.state.blocks["1"]!.active, false);
+  assert.deepEqual(runtime.state.blocks["3"]!.consumedBlockIds, [1]);
+});
+
+test("rejected prune validation leaves eligible deduplication and error purging untouched", async () => {
+  for (const invalid of ["boundary", "placeholder", "zero-gain"]) {
+    const messages = fixture();
+    messages[3]!.content = [{ type: "tool-call", id: "c2", name: "read", input: { filePath: "a.ts" } }];
+    messages[4]!.content = [{ type: "tool-result", id: "c2", name: "read", result: { type: "text", value: "latest read" } }];
+    messages.push(
+      { id: "error-call", role: "assistant", content: [{ type: "tool-call", id: "ce", name: "grep", input: {} }] },
+      { id: "error-result", role: "tool", content: [{ type: "tool-result", id: "ce", name: "grep", result: { type: "error", value: "old failure" } }] },
+    );
+    for (let i = 0; i < 6; i++) messages.push({ id: `later-${i}`, role: "user", content: [{ type: "text", text: "continue" }] });
+    const config = resolveOptions(undefined, () => {});
+    const { store, index, run } = harness({ config }, messages);
+    const runtime = await store.ensure(SESSION);
+    runtime.refs.project(index.keys);
+    if (invalid === "zero-gain") {
+      config.strategies.deduplication.enabled = false;
+      config.strategies.purgeErrors.enabled = false;
+      await run({ topic: "Seed block", content: [{ startId: "m0001", endId: "m0003", summary: "summary" }] });
+      config.strategies.deduplication.enabled = true;
+      config.strategies.purgeErrors.enabled = true;
+    }
+    const before = JSON.stringify(runtime.state);
+    await assert.rejects(run({
+      topic: "Rejected validation",
+      content: [{
+        startId: invalid === "zero-gain" ? "b1" : "m0001",
+        endId: invalid === "zero-gain" ? "b1" : invalid === "boundary" ? "m9999" : "m0003",
+        summary: invalid === "placeholder" ? "(b9)" : "summary",
+      }],
+    }), invalid === "boundary" ? /does not exist/ : invalid === "placeholder" ? /unknown compressed block/ : /would free too few tokens/);
+    assert.equal(JSON.stringify(runtime.state), before);
+    await run({ topic: "Valid call", content: [{ startId: "m0006", endId: "m0008", summary: "done" }] });
+    assert.ok(runtime.state.prunedTools["c1"]! > 0);
+    assert.ok(runtime.state.prunedTools["ce"]! > 0);
+  }
 });
 
 test("prune reports malformed arguments and empty context as thrown failures", async () => {

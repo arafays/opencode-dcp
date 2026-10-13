@@ -204,7 +204,13 @@ interface ResolvedPlan {
   consumedBlockIds: number[];
 }
 
+// Tool transforms can recreate definitions; calls sharing a store must still share the queue.
+const pruneQueues = new WeakMap<StateStore, Map<string, Promise<void>>>();
+
 export function pruneToolDefinition(deps: PruneDeps) {
+  let queue = pruneQueues.get(deps.store);
+  if (!queue) pruneQueues.set(deps.store, (queue = new Map()));
+  const pending = queue;
   return {
     name: PRUNE_TOOL_NAME,
     description: PRUNE_RANGE,
@@ -232,20 +238,27 @@ export function pruneToolDefinition(deps: PruneDeps) {
     options: { codemode: false, permission: PRUNE_TOOL_NAME },
     execute: async (input: unknown, context: PruneToolContext) => {
       // Expected failures are THROWN, never returned as model-visible success
-      // content. The platform frames a thrown error as a real tool failure
-      // (error status, so `index.ts`'s `execute.after` hook logs it as one),
-      // while a returned `context error: …` string is an ordinary COMPLETED
+      // content. Log here: rejected Promise executions can bypass the host's
+      // `execute.after` hook. A returned `context error: …` string is an ordinary COMPLETED
       // tool result that the model can only disambiguate by parsing an English
       // prefix - so it retried the same broken call. This catch only logs and
       // RETHROWS: it must never turn an expected failure into a result.
+      const sessionId = context.sessionID;
+      const run = (pending.get(sessionId) ?? Promise.resolve()).then(() =>
+        runPrune(deps, input, context),
+      );
+      const tail = run.then(() => {}, () => {});
+      pending.set(sessionId, tail);
       try {
-        return await runPrune(deps, input, context);
+        return await run;
       } catch (error) {
-        deps.logger.debug("prune tool failed", {
+        deps.logger.warn("prune tool failed", {
           sessionID: context.sessionID,
           error: error instanceof Error ? error.message : String(error),
         });
         throw error;
+      } finally {
+        if (pending.get(sessionId) === tail) pending.delete(sessionId);
       }
     },
   };
@@ -279,11 +292,6 @@ async function runPrune(deps: PruneDeps, input: unknown, context: PruneToolConte
   // keys so boundary resolution / whole-block consumption see consistent
   // coverage after an upgrade. Idempotent; no-op once normalized.
   normalizeLegacyBlockKeys(runtime.state, index.keys, index.messages);
-
-  // Automatic strategies run here so idle sessions keep
-  // their provider prompt-cache prefix stable between compressions.
-  deduplicate(runtime.state, index, deps.config);
-  purgeErrors(runtime.state, index, deps.config);
 
   // Expected, recoverable failures (unknown IDs, overlapping ranges, invalid
   // boundaries). They propagate out of `runPrune` and the platform marks the
@@ -320,9 +328,9 @@ async function runPrune(deps: PruneDeps, input: unknown, context: PruneToolConte
   // "saved" and the usage note kept saying "still above - prune again",
   // driving the model to re-prune the same region every few seconds.
   // Reject BEFORE any state mutation. A fold clears the guard only when it
-  // frees at least max(ZERO_GAIN_MIN_TOKENS, half of the standing summary):
-  // the replacement must be at most half the size AND the gain must be worth a
-  // model turn. Any range covering new messages skips the guard entirely. The
+  // frees at least max(ZERO_GAIN_MIN_TOKENS, half of the standing summary),
+  // except placeholder-free drops may free less than the absolute floor.
+  // Any range covering new messages skips the guard entirely. The
   // throw (not a returned result) is what stops the retry loop - the platform
   // reports the call as failed.
   const zeroGainRanges: string[] = [];
@@ -346,8 +354,12 @@ async function runPrune(deps: PruneDeps, input: unknown, context: PruneToolConte
     );
     const freshOriginalTokens = Math.max(0, plan.coveredTokens - consumedOriginalTokens);
     const reclaim = freshOriginalTokens + consumedSummaryTokens - newSummaryTokens;
+    // Placeholder-free drops may clear small dead blocks, but must still be substantially shorter.
+    const dropsContent =
+      plan.consumedBlockIds.length > 0 &&
+      plan.entry.summary.match(BLOCK_PLACEHOLDER_REGEX) === null && reclaim > 0;
     const floor = Math.max(
-      ZERO_GAIN_MIN_TOKENS,
+      dropsContent ? 1 : ZERO_GAIN_MIN_TOKENS,
       Math.ceil(consumedSummaryTokens * ZERO_GAIN_STANDING_SUMMARY_FRACTION),
     );
     if (reclaim < floor) {
@@ -359,9 +371,13 @@ async function runPrune(deps: PruneDeps, input: unknown, context: PruneToolConte
   }
   if (zeroGainRanges.length > 0) {
     throw new Error(
-      `these ranges add no messages outside active compressed sections and would free too few tokens: ${zeroGainRanges.join("; ")}. Prune messages not yet inside a compressed section, or fold/drop a block only when the replacement summary is at most half the standing summary and frees at least ${ZERO_GAIN_MIN_TOKENS} tokens - a re-summarize of the same size is a no-op that costs a whole model turn.`,
+      `these ranges add no messages outside active compressed sections and would free too few tokens: ${zeroGainRanges.join("; ")}. Prune messages not yet inside a compressed section, or fold a block only when the replacement summary is at most half the standing summary and frees at least ${ZERO_GAIN_MIN_TOKENS} tokens. Placeholder-free drops may free less than ${ZERO_GAIN_MIN_TOKENS} tokens but must still halve the standing summary and save tokens - a re-summarize of the same size is a no-op that costs a whole model turn.`,
     );
   }
+
+  // Invalid prunes must not change automatic pruning state or the prompt-cache prefix.
+  deduplicate(runtime.state, index, deps.config);
+  purgeErrors(runtime.state, index, deps.config);
 
   for (let planIndex = 0; planIndex < plans.length; planIndex++) {
     const plan = plans[planIndex]!;
@@ -527,83 +543,69 @@ function resolvePlans(
 ): ResolvedPlan[] {
   const keyToIndex = new Map<string, number>();
   index.keys.forEach((key, i) => keyToIndex.set(key, i));
+  const blocks = activeBlocks(runtime.state);
+  const hidden = new Set(blocks.flatMap((block) => block.coveredKeys));
+  const visible: Array<{ key: string } | { block: CompressionBlock }> = [];
+  for (const key of index.keys) {
+    for (const block of blocks) {
+      if (block.anchorKey === key) visible.push({ block });
+    }
+    if (!hidden.has(key)) visible.push({ key });
+  }
+  for (const block of blocks) {
+    if (!keyToIndex.has(block.anchorKey)) visible.push({ block });
+  }
+  const keyToPosition = new Map<string, number>();
+  const blockToPosition = new Map<number, number>();
+  visible.forEach((entry, position) => {
+    if ("key" in entry) keyToPosition.set(entry.key, position);
+    else blockToPosition.set(entry.block.blockId, position);
+  });
 
-  const claimedRanges: Array<{ start: number; end: number }> = [];
+  const claimedKeys = new Set<string>();
+  const claimedBlocks = new Set<number>();
   const plans: ResolvedPlan[] = [];
 
   for (const entry of args.content) {
-    const startIndex = boundaryToIndex(entry.startId, index, keyToIndex, runtime, "startId");
-    const endIndex = boundaryToIndex(entry.endId, index, keyToIndex, runtime, "endId");
+    const startIndex = boundaryToIndex(entry.startId, keyToPosition, blockToPosition, runtime, "startId");
+    const endIndex = boundaryToIndex(entry.endId, keyToPosition, blockToPosition, runtime, "endId");
     if (startIndex === undefined || endIndex === undefined) continue;
     if (startIndex > endIndex) {
       throw new Error(`startId ${entry.startId} appears after endId ${entry.endId}`);
     }
 
-    // Expand coverage: consuming any part of an active block consumes it whole
-    // (prevents dangling block summaries anchored inside removed regions).
     const covered = new Set<string>();
-    for (let i = startIndex; i <= endIndex; i++) covered.add(index.keys[i]!);
     const consumedBlockIds: number[] = [];
+    // Select the visible interval, never a block's hidden original span.
+    for (let i = startIndex; i <= endIndex; i++) {
+      const selected = visible[i]!;
+      if ("block" in selected) {
+        consumedBlockIds.push(selected.block.blockId);
+        for (const key of selected.block.coveredKeys) covered.add(key);
+        continue;
+      }
+      if (covered.has(selected.key)) continue;
+      const rawIndex = keyToIndex.get(selected.key)!;
+      let first = rawIndex;
+      if (index.messages[first]?.role === "tool") {
+        while (first > 0 && index.messages[first - 1]?.role === "tool") first--;
+        if (index.messages[first - 1]?.role === "assistant") first--;
+      }
+      let last = rawIndex;
+      while (index.messages[last + 1]?.role === "tool") last++;
+      for (let j = first; j <= last; j++) covered.add(index.keys[j]!);
+    }
+
+    // Snapping a tool batch into a block consumes it whole, but its anchor alone never does.
     let changed = true;
     while (changed) {
       changed = false;
-      for (const block of activeBlocks(runtime.state)) {
+      for (const block of blocks) {
         if (consumedBlockIds.includes(block.blockId)) continue;
-        const touches =
-          covered.has(block.anchorKey) ||
-          block.coveredKeys.some((key) => covered.has(key)) ||
-          block.coveredKeys.every((key) => !keyToIndex.has(key));
-        if (!touches) continue;
+        if (!block.coveredKeys.some((key) => covered.has(key))) continue;
         consumedBlockIds.push(block.blockId);
         for (const key of block.coveredKeys) covered.add(key);
         changed = true;
-      }
-    }
-
-    const coveredKeys = [...covered].filter((key) => keyToIndex.has(key));
-    coveredKeys.sort((left, right) => (keyToIndex.get(left) ?? 0) - (keyToIndex.get(right) ?? 0));
-
-    // Overlap with an explicitly selected range of another plan is invalid;
-    // overlap arising purely through whole-block consumption is fine.
-    const start = keyToIndex.get(coveredKeys[0]!) ?? startIndex;
-    const end = keyToIndex.get(coveredKeys.at(-1)!) ?? endIndex;
-    for (const range of claimedRanges) {
-      const overlapsExplicit =
-        !(endIndex < range.start || startIndex > range.end) &&
-        !(consumedBlockIds.length > 0 && covered.size > endIndex - startIndex + 1);
-      if (overlapsExplicit) {
-        throw new Error(
-          `ranges overlap: ${entry.startId}..${entry.endId} intersects another range`,
-        );
-      }
-    }
-    claimedRanges.push({ start, end });
-
-    // Snap endIndex forward while the next message is a tool result, so that
-    // call/result pairs stay atomic and the anchor is never a standalone tool
-    // message without its preceding assistant. Keyed on role (not on the
-    // `tool:<callId>` key form) so it keeps working if key derivation changes.
-    let endIndexAdjusted = endIndex;
-    while (
-      endIndexAdjusted + 1 < index.messages.length &&
-      index.messages[endIndexAdjusted + 1]?.role === "tool"
-    ) {
-      covered.add(index.keys[endIndexAdjusted + 1]!);
-      endIndexAdjusted++;
-    }
-    const nextKey = index.keys[endIndexAdjusted + 1];
-    const anchorKey = nextKey ?? TAIL_ANCHOR;
-
-    // Snap startIndex backward when the range starts inside an assistant→result
-    // batch: extend coverage back over the whole consecutive tool run and the
-    // assistant that issued it, so no kept assistant is left with covered
-    // tool_calls and no kept result outlives its issuing assistant.
-    if (index.messages[startIndex]?.role === "tool") {
-      let runStart = startIndex;
-      while (runStart > 0 && index.messages[runStart - 1]?.role === "tool") runStart--;
-      for (let i = runStart; i < startIndex; i++) covered.add(index.keys[i]!);
-      if (index.messages[runStart - 1]?.role === "assistant") {
-        covered.add(index.keys[runStart - 1]!);
       }
     }
 
@@ -612,6 +614,24 @@ function resolvePlans(
     const finalCoveredKeys = [...covered]
       .filter((key) => keyToIndex.has(key))
       .sort((left, right) => (keyToIndex.get(left) ?? 0) - (keyToIndex.get(right) ?? 0));
+
+    if (
+      finalCoveredKeys.some((key) => claimedKeys.has(key)) ||
+      consumedBlockIds.some((id) => claimedBlocks.has(id))
+    ) {
+      throw new Error(`ranges overlap: ${entry.startId}..${entry.endId} intersects another range`);
+    }
+    for (const key of finalCoveredKeys) claimedKeys.add(key);
+    for (const id of consumedBlockIds) claimedBlocks.add(id);
+    const last = visible[endIndex]!;
+    let anchorKey: string;
+    if ("block" in last) {
+      anchorKey = last.block.anchorKey;
+    } else {
+      let rawEnd = keyToIndex.get(last.key)!;
+      while (index.messages[rawEnd + 1]?.role === "tool") rawEnd++;
+      anchorKey = index.keys[rawEnd + 1] ?? TAIL_ANCHOR;
+    }
 
     const finalCoveredToolIds = index.toolOrder.filter(
       (callId) => index.tools.get(callId)?.hasResult && covered.has(index.tools.get(callId)!.key),
@@ -634,27 +654,24 @@ function resolvePlans(
 
 function boundaryToIndex(
   id: string,
-  index: TranscriptIndex,
-  keyToIndex: Map<string, number>,
+  keyToPosition: Map<string, number>,
+  blockToPosition: Map<number, number>,
   runtime: SessionRuntime,
   field: string,
 ): number | undefined {
   const parsed = parseBoundaryChecked(id, field);
   if (parsed.kind === "message") {
     const refKey = runtime.refs.keyOf(parsed.ref);
-    const idx = refKey !== undefined ? keyToIndex.get(refKey) : undefined;
+    const idx = refKey !== undefined ? keyToPosition.get(refKey) : undefined;
     if (idx !== undefined) return idx;
     throw new Error(`${field} ${id} does not exist in the current context`);
   }
   const block = runtime.state.blocks[String(parsed.blockId)];
   if (!block) throw new Error(`${field} ${id} references an unknown compressed block`);
-  const indices = block.coveredKeys
-    .map((key) => keyToIndex.get(key))
-    .filter((value): value is number => value !== undefined);
-  if (indices.length === 0) {
-    throw new Error(`${field} ${id} references a block with no visible messages`);
-  }
-  return field === "startId" ? Math.min(...indices) : Math.max(...indices);
+  if (!block.active) throw new Error(`${field} ${id} references an inactive compressed block`);
+  const position = blockToPosition.get(parsed.blockId);
+  if (position === undefined) throw new Error(`${field} ${id} references a block with no visible summary`);
+  return position;
 }
 
 type ParsedBoundary = { kind: "message"; ref: string } | { kind: "block"; blockId: number };

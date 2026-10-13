@@ -126,6 +126,7 @@ export function applyCompression(input: {
   }
   state.blocks[String(blockId)] = block
 
+  const replacementIndex = state.activeBlockIds.findIndex((id) => input.consumedBlockIds.includes(id))
   for (const consumedId of input.consumedBlockIds) {
     const consumed = state.blocks[String(consumedId)]
     if (consumed && consumed.active) {
@@ -165,7 +166,8 @@ export function applyCompression(input: {
     other.coveredKeys = other.coveredKeys.filter((key) => !input.coveredKeys.includes(key))
   }
 
-  state.activeBlockIds.push(blockId)
+  // Replacements keep their slot so summaries sharing an anchor do not reorder.
+  state.activeBlockIds.splice(replacementIndex < 0 ? state.activeBlockIds.length : replacementIndex, 0, blockId)
   state.stats.compressRuns += 1
   state.nudgeAnchors = []
   // The next dispatch owes the model one acknowledgement: the pressure
@@ -174,7 +176,7 @@ export function applyCompression(input: {
   return block
 }
 
-/** Active blocks sorted by creation order. */
+/** Active blocks in summary insertion order. */
 export function activeBlocks(state: SessionState): CompressionBlock[] {
   return state.activeBlockIds
     .map((id) => state.blocks[String(id)])

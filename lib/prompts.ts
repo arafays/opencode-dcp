@@ -20,18 +20,19 @@ Context pressure notes arrive as \`<dcp-system-reminder>\` messages re-measured 
 export const PRUNE_RANGE = `Replace one or more conversation ranges with your own dense summaries.
 
 SUMMARIES
-Keep decisions, file paths, signatures, constraints, findings, and current task state. Quote short user messages verbatim; never alter user intent, scope, constraints, priorities, or acceptance criteria. Drop noise: failed attempts, verbose tool output, back-and-forth exploration.
+Keep decisions, file paths, signatures, constraints, findings, and current task state, including the latest mode/agent transition, preview URL, verification status, and unfinished work. Keep observed facts and their sources; never invent details or turn guesses into findings. Quote short user messages verbatim; never alter user intent, scope, constraints, priorities, or acceptance criteria. Drop noise: failed attempts, verbose tool output, back-and-forth exploration.
 
 BOUNDARY IDS
-Each range is { startId, endId, summary }. Use IDs from <dcp-message-id> tags: mNNNN = raw messages, bN = previously pruned blocks. IDs must exist in context; startId must come before endId. Batch independent non-overlapping ranges as separate entries in one call's content array.
-mNNNN tags are renumbered every dispatch: they are dense from m0001 and strictly ascending in transcript order, so a lower number is ALWAYS an earlier message. A range spanning the whole transcript is fine - m0001 to the last ID - and is usually the cheapest way to clear old work.
+Each range is { startId, endId, summary }; both endpoints are required, even for one block: { startId: "b10", endId: "b10", summary: "Obsolete research dropped." }. Copy IDs from currently visible <dcp-message-id> tags: mNNNN = raw messages, bN = previously pruned blocks. IDs must exist in context; startId must come before or equal endId. Batch independent non-overlapping ranges in one call, not parallel prune calls.
+mNNNN IDs are renumbered every dispatch and strictly ascending in transcript order, so a lower number is ALWAYS an earlier message. Visible tags may have gaps: never infer missing IDs or reuse endpoints from earlier calls. After an unknown-ID error, use currently visible tags, not guessed increments or decrements. A range spanning the whole transcript is fine - m0001 to the last ID, when both tags are visible - if its summary preserves all still-needed information.
 
 PREVIOUSLY PRUNED BLOCKS
 A range may cover pruned block summaries (marked [Compressed conversation section] with a bN ID):
 - Include \`(bN)\` exactly once in the summary to carry that block's full content forward; write surrounding text so it still reads after expansion.
 - Omit \`(bN)\` to permanently drop that block's content. Do this when the work it describes no longer matters to the current task.
 - Never emit \`(bN)\` text outside a placeholder; mention blocks in prose as plain text like \`pruned bN\`.
-- A range covering ONLY already-compressed messages is rejected unless the replacement summary is at most ${(ZERO_GAIN_STANDING_SUMMARY_FRACTION * 100).toFixed(0)}% the size of the standing summary AND frees at least ${ZERO_GAIN_MIN_TOKENS} tokens: a same-size re-summarization is a no-op that costs a whole model turn. Prune uncovered messages instead, or fold/drop a block only with a substantially shorter summary.
+- A range covering ONLY already-compressed messages is rejected unless the replacement summary is at most ${(ZERO_GAIN_STANDING_SUMMARY_FRACTION * 100).toFixed(0)}% the size of the standing summary AND frees at least ${ZERO_GAIN_MIN_TOKENS} tokens. Placeholder-free drops of dead content may free less than ${ZERO_GAIN_MIN_TOKENS} tokens but must still halve the standing summary and save tokens. A same-size re-summarization is a no-op that costs a whole model turn.
+- After a low-gain rejection, leave that block alone unless you can substantially shorten it. Continue the task if nothing else qualifies; the pruning budget is a housekeeping threshold, not proof the model window is full.
 
 OUTPUT FORMAT
 Call with topic (3-5 word label) and content: [{ startId, endId, summary }, ...].

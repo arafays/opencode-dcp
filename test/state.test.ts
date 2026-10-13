@@ -127,6 +127,25 @@ test("applyCompression releases refs for covered keys and consumed blocks", () =
   ]);
 });
 
+test("replacement blocks keep the first consumed slot and preserve independent ranges", () => {
+  for (const consumed of [[1], [2], [4], [3, 2]]) {
+    const state = createSessionState("s");
+    const refs = new RefRegistry();
+    const add = (coveredKeys: string[], consumedBlockIds: number[] = []) => applyCompression({
+      state, refs, topic: "range", summary: "findings", coveredKeys,
+      coveredToolIds: [], coveredTokens: 100, consumedBlockIds, anchorKey: "shared",
+    });
+    for (let i = 1; i <= 4; i++) add([`key:${i}`]);
+    add(consumed.map((id) => `key:${id}`), consumed);
+    const expected = [1, 2, 3, 4].filter((id) => !consumed.includes(id));
+    expected.splice(Math.min(...consumed) - 1, 0, 5);
+    assert.deepEqual(state.activeBlockIds, expected);
+    assert.deepEqual(hydrateSessionState(JSON.parse(JSON.stringify(state)), "s").activeBlockIds, expected);
+    add(["independent"]);
+    assert.deepEqual(state.activeBlockIds, [...expected, 6]);
+  }
+});
+
 // -- event pump ---------------------------------------------------------------
 
 const PUMP_SESSION = "ses_events";

@@ -61,6 +61,18 @@ test("a range spanning the whole transcript is described as valid", () => {
   assert.match(PRUNE_RANGE, /m0001 to the last ID/);
 });
 
+test("prune guidance addresses observed session failures without encouraging guessed IDs", () => {
+  assert.match(PRUNE_RANGE, /both endpoints are required/);
+  assert.match(PRUNE_RANGE, /startId: "b10", endId: "b10"/);
+  assert.match(PRUNE_RANGE, /Visible tags may have gaps/);
+  assert.match(PRUNE_RANGE, /never infer missing IDs or reuse endpoints/);
+  assert.match(PRUNE_RANGE, /not parallel prune calls/);
+  assert.match(PRUNE_RANGE, /latest mode\/agent transition, preview URL, verification status/);
+  assert.match(PRUNE_RANGE, /never invent details or turn guesses into findings/);
+  assert.match(PRUNE_RANGE, /Placeholder-free drops of dead content may free less/);
+  assert.match(PRUNE_RANGE, /After a low-gain rejection, leave that block alone/);
+});
+
 test("pressure copy never leads with a percentage of the pruning budget", () => {
   for (const [label, text] of [
     ["nudge", CONTEXT_LIMIT_NUDGE(500_000, BUDGET, WINDOW)],
