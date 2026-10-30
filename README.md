@@ -1,34 +1,33 @@
 # opencode-dcp
 
-Dynamic Context Pruning (DCP) for **OpenCode V2**.
+Dynamic Context Pruning (DCP) for **OpenCode V2** — the official OpenCode release.
 
 Keeps the model's context window high-signal by letting the model compress closed
-sections of the conversation into its own dense technical summaries, pruning
-superseded tool outputs, and nudging when context pressure crosses a budget.
+sections of the conversation into dense technical summaries, pruning superseded
+tool outputs, and nudging when context pressure crosses a budget.
 
-> Requires OpenCode V2 (`opencode2`, 2.0+). The 2.x plugin API can still shift
-> between releases, so the package tracks `@opencode/plugin` directly.
+Requires [OpenCode V2](https://opencode.ai/v2/docs).
 
 ## Install
 
 ```sh
-opencode2 plugin add opencode-dcp
+opencode plugin add opencode-dcp
 ```
 
 This installs the package into OpenCode's plugin cache and registers its server
-entrypoint in your global config. The TUI companion needs no extra step: the
-runtime detects the companion itself (via the package's `./tui` export), so a
-locally connected TUI discovers the active plugin and loads its `./tui` export
-from the cache on its own. Or add it
-directly to a project config:
+entrypoint in your global config. The TUI companion loads automatically; no
+extra step is needed.
 
-```jsonc title=".opencode/opencode.json"
+To configure it in a project, add it to `opencode.jsonc` (or
+`.opencode/opencode.json`):
+
+```jsonc
 {
+  "$schema": "https://opencode.ai/config.json",
   "plugins": [
     {
       "package": "opencode-dcp",
       "options": {
-        "debug": false,
         "maxContextLimit": "70%"
       }
     }
@@ -36,92 +35,45 @@ directly to a project config:
 }
 ```
 
-**Development** (this repo): build first (`npm install && npm run build`), then
-point config at the local entrypoint:
+## What it does
 
-```jsonc title=".opencode/opencode.json"
-{
-  "plugins": [
-    {
-      "package": "../dist",
-      "options": {
-        "debug": true,
-        "maxContextLimit": "70%",
-        "tui": { "enabled": false }
-      }
-    }
-  ]
-}
-```
+DCP transforms only the outbound transcript sent to the model; stored session
+history is never modified.
 
-The build copies `tui.tsx` next to `dist/index.js`, and the runtime auto-loads a
-sibling `tui.*` file beside a local plugin's `index.*` entrypoint — so the
-companion loads for this local-path entry too, exactly like the `./tui` export
-does for package installs.
+- **Compression** — the model calls `prune` to replace closed conversation
+  sections with dense summaries. Ranges are addressed by boundary IDs (`m0001…`
+  for messages, `b1…` for compressed blocks).
+- **Tool-output pruning** — superseded and errored tool outputs are replaced
+  with short placeholders. Protected tools are never touched.
+- **Context nudges** — when usage crosses `maxContextLimit`, the model is
+  reminded to prune. Reminders quote both the pruning budget and the model
+  window, and a completed prune is acknowledged on the next dispatch.
+- **TUI panel** — a companion panel shows live savings, a prune summary card,
+  and a per-session compression report.
 
-> OpenCode V2 auto-updates, so the package tracks `@opencode/plugin`; the
-> committed lockfile pins the exact resolved version for local dev.
-
-## How it works
-
-On every model dispatch (`ctx.session.hook("context")`) the plugin transforms the
-outbound transcript only — stored session history is never modified:
-
-1. **Scan & mirror** — index the transcript with stable keys; remember it so the
-   `prune` tool can resolve ranges.
-2. **Boundary IDs** — every message gets an alias `m0001, m0002, …` injected as
-   `<dcp-message-id>` tags on user texts and textual tool results. Compressed
-   sections are addressed as `b1, b2, …`.
-3. **Compression blocks** — active blocks remove their covered ranges and splice
-   a synthetic `[Compressed conversation section]` summary at the recorded anchor.
-4. **Pruning** — superseded/errored tool outputs are replaced with short
-   placeholders (protected tools like `question`/`edit` are never touched).
-5. **Nudges** — when provider usage crosses `maxContextLimit`, a reminder asks
-   the model to run `prune`; rate-limited by `nudgeFrequency`. Reminders name
-   both denominators (the pruning budget and the model window) and re-measure
-   per dispatch, so an older percentage is never acted on. A completed prune is
-   answered by a one-shot acknowledgement on the next dispatch that quotes the
-   fresh measurement and says whether another pass is needed.
-
-The model calls **`prune`** itself. It is deliberately registered as a **direct**
-tool (`options.codemode: false`, never the platform's `codemode: true` default):
-only `codemode === false` tools are emitted as native tool definitions, so the
-full `PRUNE_RANGE` boundary-ID rules ship on every request instead of being
-folded into the Code Mode `execute` catalog, whose inline listings truncate each
-tool's first line to 120 characters. The name `prune` avoids clashing with the
-platform's built-in compress tool, and `options.permission: "prune"` pins the
-permission action to the tool's own name. It picks non-overlapping ranges by boundary ID and writes
-dense summaries per range. A range may cover previously pruned blocks: including
-`(bN)` carries that block's full content forward, omitting it permanently drops
-the block's content from context — how stale completed work gets pruned.
-Deduplication and error-purge strategies run
-at compression time so idle sessions keep their prompt-cache prefix stable.
-State persists per session across restarts via plugin storage.
+The model drives pruning itself with the `prune` tool. It selects non-overlapping
+ranges and writes one dense summary per range. A range may cover previously
+pruned blocks: including `(bN)` carries that block's content forward; omitting it
+drops the block from context. Deduplication and error-purge strategies run at
+compression time so idle sessions keep a stable prompt-cache prefix. State is
+scoped per session and survives restarts.
 
 ## TUI panel
 
-A companion TUI module ships with the package and is **enabled by default**
-(the runtime loads the package's `./tui` export). While a session runs it shows:
+The companion TUI module is enabled by default and shows:
 
-- **Prompt footer status**: live outbound-token savings of the last dispatch
-  (`DCP −38% · 8.1k pruned`), or — while no blocks are active — the measured
-  window pressure (`DCP idle · 62% of window`) instead of a misleading
-  `−0%` savings figure.
-- **Prune summary card** above the composer: pops when a compression lands and
-  auto-hides after 30 seconds — cumulative savings, a context-usage bar for the
-  session model, and the compression's scope: the pruned section before/after
-  token sizes (`19.5k → 0.7k tok`, with the percent scoped to the section, not
-  the whole context). Command palette →
-  "DCP: toggle prune summary card" pins it for the session.
-- **Command palette → "DCP: compression report"**: per-session totals
-  (dispatches, compressions, blocks), last-dispatch delta, cumulative token
-  savings from blocks and pruning, and the most recent compression events.
+- **Prompt footer status** — live outbound-token savings from the last dispatch
+  (`DCP −38% · 8.1k pruned`), or the measured window pressure while no blocks
+  are active (`DCP idle · 62% of window`).
+- **Prune summary card** — appears when a compression lands and auto-hides after
+  30 seconds. Shows cumulative savings, context usage, and the pruned section's
+  before/after sizes.
+- **Compression report** — per-session totals, last-dispatch delta, cumulative
+  savings, and recent compression events. Open it from the command palette
+  (`DCP: compression report`) or pin the summary card with
+  `DCP: toggle prune summary card`.
 
-Mechanism: the server plugin writes a stats snapshot to the TUI's watched
-storage file (`~/.local/state/opencode/<channel>/tui/plugin.opencode.dcp.tui.stats.json`)
-after every dispatch and compression; the TUI module reads it as a reactive
-store, so numbers update live. Disabling stops stats writes and quiets the
-panel:
+Disable the panel with:
 
 ```jsonc
 {
@@ -165,13 +117,6 @@ All optional (defaults shown):
 Permissions: the tool's permission action is `prune`; gate it with normal V2
 permission rules (`{ "action": "prune", "effect": "allow" }`).
 
-## Develop
-
-```sh
-npm install
-npm run typecheck   # tsc --noEmit
-npm test            # node --import tsx --test test/*.test.ts
-npm run build       # tsup -> dist/
-```
+## License
 
 MIT. See [LICENSE](./LICENSE).
