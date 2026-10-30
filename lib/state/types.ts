@@ -158,6 +158,7 @@ function coerceCompressionRecord(value: unknown): CompressionEventRecord | undef
     tokensBefore: raw.tokensBefore,
     tokensAfter: raw.tokensAfter,
     tokensSaved: raw.tokensSaved,
+    usageAfter: typeof raw.usageAfter === "number" ? raw.usageAfter : undefined,
   }
 }
 

@@ -28,6 +28,13 @@ export interface CompressionEventRecord {
   tokensBefore: number;
   tokensAfter: number;
   tokensSaved: number;
+  /**
+   * Post-prune context estimate the prune tool reported to the model. Absent
+   * when the usage tracker was blind (0) at prune time, and in older snapshots.
+   * The first dispatch after the prune quotes it in its ack so the two numbers
+   * agree.
+   */
+  usageAfter?: number;
 }
 
 export interface DispatchMetrics {

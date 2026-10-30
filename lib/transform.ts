@@ -307,10 +307,19 @@ async function injectNudges(
   deps.usage.seed(event.sessionID, measuredTokens);
   // A provider delta recorded BEFORE the newest prune describes the pre-prune
   // prompt: max()ing it back in would re-nudge the model with the exact number
-  // it just acted on. On that dispatch only the measurement is current, so it
-  // wins outright instead of joining the max.
-  const usageTokens = deps.usage.isStale(event.sessionID)
-    ? measuredTokens
+  // it just acted on. The gate is the ack's OWN condition - a prune still owing
+  // its one acknowledgement (`pruneSeq > pruneAckSeq`, read before
+  // `maybePruneAck` consumes it below) - and not `UsageTracker.isStale`: the
+  // tracker's epoch lives only in process memory, so after a plugin reload or
+  // server restart `isStale` is false while the persisted `pruneSeq`/`usageAfter`
+  // still owe the model the number its prune result quoted.
+  const ackPending = state.pruneSeq > state.pruneAckSeq;
+  // The record for that owed ack. `usageAfter` is the prune tool's own
+  // post-prune estimate - the only figure that counts the system prompt and
+  // tool definitions the measurement above cannot see - so it floors the ack.
+  const lastCompression = state.stats.recentCompressions.at(-1);
+  const usageTokens = ackPending
+    ? Math.max(measuredTokens, lastCompression?.usageAfter ?? 0)
     : Math.max(deps.usage.totalFor(event.sessionID), measuredTokens);
   // The window is always defined: an unlisted/limit-less model falls back to
   // the default, so every reminder can name both denominators.
@@ -318,7 +327,6 @@ async function injectNudges(
 
   // A completed prune answers its own pressure reminder on this dispatch -
   // before any new nudge can fire off the pre-prune estimate.
-  const lastCompression = state.stats.recentCompressions.at(-1);
   const ack = maybePruneAck({
     state,
     config: deps.config,

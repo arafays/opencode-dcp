@@ -60,6 +60,33 @@ Publishing is npm OIDC trusted publishing (no `NPM_TOKEN` secret); auth/provenan
 
 The V2 plugin API is beta and moving between releases. When `@opencode/plugin` types disagree with runtime behavior, check the opencode-v2 source rather than trusting either alone. The server side of the plugin context lives in `packages/plugin/src/promise/*.ts` (one domain per file); event payload shapes and `ModelInfo`/`SessionInfo` fields live in `packages/client/src/promise/generated/types.ts`.
 
+## V2 compatibility policy
+
+The user's standing rules: **always update to latest — pull the `opencode-v2` reference to latest AND keep the `@opencode/plugin` dependency at npm's latest — and make sure the plugin stays compatible and works best with it.** Concretely:
+
+- Pull the reference first: `git -C ~/.local/share/opencode/repos/github.com/anomalyco/opencode@v2 pull --ff-only` (branch `v2`). Never adjust the plugin to a stale snapshot.
+- Update the dependencies: `AUBE_MINIMUM_RELEASE_AGE=0 aube update @opencode/plugin @opencode/theme` (specifiers stay `latest` in `package.json`; the lockfile is the pin). Then `aubr typecheck` + `aube test`, and `npm run build` before live testing.
+- Check the behavior against the published package rather than the reference source — the snapshot's `packages/plugin/package.json` version can trail npm (`2.0.26` in the snapshot vs `dist-tags.latest 2.2.3`); `npm view @opencode/plugin version` is the version source of truth.
+- Last verified pairing (2026-10-30): `@opencode/plugin` + `@opencode/theme` 2.2.3 — typecheck green, all 178 tests pass.
+
 ## Reference repos (wired in `.opencode/opencode.json`)
 
-- `opencode-v2` — OpenCode V2 source: use for plugin API surface (hooks, tool/command transform, storage, events, permissions) and config schema details.
+- `opencode-v2` — OpenCode V2 source: use for plugin API surface (hooks, tool/command transform, storage, events, permissions) and config schema details. Clone lives at `~/.local/share/opencode/repos/github.com/anomalyco/opencode@v2` (origin: `https://github.com/anomalyco/opencode.git`, branch `v2`).
+
+## Local OpenCode config — do not re-enable plugins
+
+The repo's `.opencode/opencode.json` is a dev harness loading the DCP plugin from `../dist` (see Gotchas) and is already enabled. A standing policy MUST remain in place:
+
+```jsonc
+"experimental": {
+  "policies": [
+    {
+      "action": "integration.use",
+      "resource": "plugin:opencode-dcp",
+      "effect": "deny"
+    }
+  ]
+}
+```
+
+Verified decision matching (`packages/core/src/managed-policy.ts`, `ManagedPolicy.decision`): `policies.findLast((policy) => policy.action === action && Wildcard.match(resource, policy.resource))?.effect ?? "allow"` — trailing statements win, no match defaults to allow. So the config's single literal deny (`resource: "plugin:opencode-dcp"`, no wildcard) blocks only npm-name plugin installs: in `packages/core/src/plugin/module.ts` an npm target like `opencode-dcp@2.0.3` is trimmed at the `@` to `opencode-dcp` (resource `plugin:opencode-dcp` → deny → `{ blocked: true }`), while a path target with no `@` — the harness's `../dist` — stays literal (resource `plugin:../dist`) and loads normally. Consequence: the plugin stays enabled through the `../dist` source only; if any other copy must also work, either change the policy resource in `.opencode/opencode.json` or raise it with the user.

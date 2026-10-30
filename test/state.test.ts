@@ -62,6 +62,28 @@ test("hydrateSessionState coerces persisted compression records and drops junk",
   assert.equal(state.stats.recentCompressions[1]?.toolsCovered, undefined);
 });
 
+test("hydrateSessionState keeps the persisted post-prune usage estimate", () => {
+  const state = hydrateSessionState(
+    {
+      sessionId: "s",
+      stats: {
+        recentCompressions: [
+          { ...record(1), usageAfter: 12_345 },
+          { ...record(2), usageAfter: "bad" },
+          record(3),
+        ],
+      },
+    },
+    "s",
+  );
+  // The ack on the first dispatch after a restart repeats this figure, so it
+  // must survive hydration; a malformed value and older records drop to
+  // undefined (the ack then falls back to the transcript measurement).
+  assert.equal(state.stats.recentCompressions[0]?.usageAfter, 12_345);
+  assert.equal(state.stats.recentCompressions[1]?.usageAfter, undefined);
+  assert.equal(state.stats.recentCompressions[2]?.usageAfter, undefined);
+});
+
 test("hydrateSessionState caps the compression history", () => {
   const recentCompressions = Array.from({ length: MAX_RECENT_COMPRESSIONS + 5 }, (_, index) =>
     record(index),

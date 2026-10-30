@@ -180,9 +180,10 @@ export interface PruneDeps {
   getUsageTokens: (sessionId: string) => number;
   /**
    * Marks the usage estimate as predating this prune. The next dispatch then
-   * trusts its own transcript measurement instead of maxing the pre-prune
-   * provider delta back in (which re-nudged the model with the number it just
-   * acted on). Optional so embedders without a tracker keep working.
+   * floors its own transcript measurement with the prune's recorded
+   * post-prune estimate instead of maxing the pre-prune provider delta back in
+   * (which re-nudged the model with the number it just acted on). Optional so
+   * embedders without a tracker keep working.
    */
   markPruned?(sessionId: string): void;
   /** Publishes a completed compression to the TUI stats bridge (optional). */
@@ -417,6 +418,19 @@ async function runPrune(deps: PruneDeps, input: unknown, context: PruneToolConte
     Math.max(0, tokensCovered - consumedOriginalTokens) + consumedSummaryTokens;
   const tokensSaved = Math.max(0, tokensBefore - tokensSummaries);
 
+  // Capture occupancy BEFORE `markPruned`: the tracker zeroes its estimate
+  // and drops the baseline on a prune (the on-hand delta describes the
+  // pre-prune prompt), so reading it afterwards would report 0. That also
+  // makes a SECOND prune in the same turn read 0 - the previous record's
+  // `usageAfter` is then the post-prune base to subtract this pass from.
+  const usageTokens = deps.getUsageTokens(sessionId);
+  const previousUsage =
+    usageTokens > 0 ? usageTokens : (runtime.state.stats.recentCompressions.at(-1)?.usageAfter ?? 0);
+  // `tokensSaved` is the honest outbound delta computed above: exactly the
+  // fresh originals plus consumed summaries this pass removed, minus the
+  // new summaries standing in for them.
+  const postPruneUsage = Math.max(0, previousUsage - tokensSaved);
+
   const record: CompressionEventRecord = {
     at: Date.now(),
     blockId: lastBlockId,
@@ -427,6 +441,11 @@ async function runPrune(deps: PruneDeps, input: unknown, context: PruneToolConte
     tokensBefore,
     tokensAfter: tokensSummaries,
     tokensSaved,
+    // Persisted with the record so the ack on the next dispatch repeats the
+    // figure the usage note prints instead of re-measuring the wire transcript
+    // alone (which omits the system prompt and tool definitions and read ~3K
+    // against this note's ~20K for the same prune).
+    usageAfter: postPruneUsage > 0 ? postPruneUsage : undefined,
   };
 
   // The record rides in the persisted state (not just the TUI bridge's
@@ -436,11 +455,6 @@ async function runPrune(deps: PruneDeps, input: unknown, context: PruneToolConte
   while (runtime.state.stats.recentCompressions.length > MAX_RECENT_COMPRESSIONS) {
     runtime.state.stats.recentCompressions.shift();
   }
-
-  // Capture occupancy BEFORE `markPruned`: the tracker zeroes its estimate
-  // and drops the baseline on a prune (the on-hand delta describes the
-  // pre-prune prompt), so reading it afterwards would report 0.
-  const usageTokens = deps.getUsageTokens(sessionId);
 
   // Any occupancy recorded before this point describes the pre-prune
   // prompt; flag it so the next dispatch measures fresh instead of
@@ -467,10 +481,6 @@ async function runPrune(deps: PruneDeps, input: unknown, context: PruneToolConte
   // percentage of only one of them is what reads as stale or contradictory.
   const window = deps.getModelContextLimit(sessionId) ?? FALLBACK_CONTEXT_WINDOW;
   const budget = resolveLimit(deps.config.maxContextLimit, window);
-  // `tokensSaved` is the honest outbound delta computed above: exactly the
-  // fresh originals plus consumed summaries this pass removed, minus the
-  // new summaries standing in for them.
-  const postPruneUsage = Math.max(0, usageTokens - tokensSaved);
   // Same spellings as the pressure reminder (`contextUsage` / `budgetClause`),
   // so this result can never contradict the nudge the model just acted on -
   // naming the window first and the budget as a trailing threshold.

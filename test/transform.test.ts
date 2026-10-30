@@ -62,6 +62,35 @@ function fixture(): WireMessage[] {
   ];
 }
 
+/**
+ * `fixture()` with a ~1.9K-token tool output inside its first four messages,
+ * so a prune of m0001..m0004 reclaims a measurable amount.
+ */
+function bigToolFixture(): WireMessage[] {
+  return [
+    { id: "u1", role: "user", content: [{ type: "text", text: "explore auth" }] },
+    {
+      id: "a1",
+      role: "assistant",
+      content: [{ type: "tool-call", id: "c1", name: "read", input: { filePath: "a.ts" } }],
+    },
+    {
+      id: "t1",
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          id: "c1",
+          name: "read",
+          result: { type: "text", value: "auth route detail. ".repeat(400) },
+        },
+      ],
+    },
+    { id: "a2", role: "assistant", content: [{ type: "text", text: "findings so far" }] },
+    { id: "u2", role: "user", content: [{ type: "text", text: "implement now" }] },
+  ];
+}
+
 function harness(depsOverride: Partial<TransformDeps> = {}) {
   const store = new StateStore(undefined);
   const mirror = new TranscriptMirror();
@@ -314,15 +343,27 @@ test("dispatch stats carry the resolved context limit for the TUI", async () => 
 // `applyCompression` clears the rate-limit anchors and the warm provider delta
 // still described the pre-prune prompt, so the very next dispatch re-nudged
 // with the number the model had just acted on. The dispatch after a prune must
-// instead acknowledge the prune with a fresh measurement and go quiet.
+// instead acknowledge the prune with a fresh number and go quiet.
 test("the dispatch after a prune acknowledges with fresh numbers instead of re-nudging", async () => {
   const { store, mirror, deps, hook } = harness();
   // Warm tracker reporting a pre-prune 150K (the stale arm).
   deps.usage.record(SESSION, { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 });
   deps.usage.record(SESSION, { input: 150_000, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 });
 
+  // ~14K tokens the prune reclaims, so its post-prune estimate (~136K) lands
+  // under the 140K budget; the prune tool is the only source that can see the
+  // system prompt, so the ack repeats its figure.
+  const bigFirstTurn = (): WireMessage[] => [
+    {
+      id: "u1",
+      role: "user",
+      content: [{ type: "text", text: `explore auth ${"auth route detail. ".repeat(3000)}` }],
+    },
+    ...fixture().slice(1),
+  ];
+
   // Dispatch 1: over budget, so the pressure reminder fires.
-  const first = fixture();
+  const first = bigFirstTurn();
   await run(hook, first);
   assert.match(remindersOf(first), /Context is ~150,000 tokens/);
 
@@ -345,16 +386,17 @@ test("the dispatch after a prune acknowledges with fresh numbers instead of re-n
   );
   assert.ok(String(pruned.content).includes("b1"), String(pruned.content));
 
-  // Dispatch 2: the ack wins over the nudge, quotes the fresh measurement
-  // (the stale 150K must not reappear), and resolves the earlier reminder.
-  const second = fixture();
+  // Dispatch 2: the ack wins over the nudge, quotes the post-prune figure the
+  // tool just reported (the stale 150K must not reappear), and resolves the
+  // earlier reminder.
+  const second = bigFirstTurn();
   await run(hook, second);
   const ack = remindersOf(second);
   assert.match(ack, /Prune applied \(b1\)/);
   assert.ok(!ack.includes("150,000"), ack);
   assert.match(ack, /No further pruning needed/);
 
-  // Dispatch 3: the ack is consumed and the measurement is still under budget,
+  // Dispatch 3: the ack is consumed and the estimate is still under budget,
   // so nothing is injected. `markPruned` zeroed the pre-prune delta and dropped
   // the baseline, so dispatch 2 re-seeded the tracker from its own (small)
   // measurement - a current number recorded against the new epoch, which
@@ -362,9 +404,100 @@ test("the dispatch after a prune acknowledges with fresh numbers instead of re-n
   assert.equal(deps.usage.isStale(SESSION), false);
   assert.ok(deps.usage.totalFor(SESSION) > 0);
   assert.ok(deps.usage.totalFor(SESSION) < 140_000);
-  const third = fixture();
+  const third = bigFirstTurn();
   await run(hook, third);
   assert.equal(remindersOf(third), "");
+});
+
+// The live-verified bug this pins: the prune result derived its post-prune
+// figure from the provider tracker (pre-prune usage minus the saved delta),
+// but the next dispatch's ack re-measured only the wire transcript - which
+// carries neither the system prompt nor the tool definitions - and quoted a far
+// smaller number (19,749 in the result vs 3,052 in the ack for the same prune).
+// The ack must repeat the figure the model read one step earlier.
+test("the ack repeats the prune tool's post-prune estimate, not the transcript-only one", async () => {
+  const { store, mirror, deps, hook } = harness();
+
+  const tool = pruneToolDefinition({
+    store,
+    mirror,
+    logger: createLogger(false),
+    config: CONFIG,
+    getModelContextLimit: () => 200_000,
+    getUsageTokens: () => 150_000,
+    markPruned: (id) => deps.usage.markPruned(id),
+  });
+
+  await run(hook, bigToolFixture());
+  const pruned = await tool.execute(
+    {
+      topic: "Auth exploration",
+      content: [{ startId: "m0001", endId: "m0004", summary: "Explored auth." }],
+    },
+    { sessionID: SESSION },
+  );
+  const result = String(pruned.content);
+  const reported = result.match(/Context is now ~([\d,]+) tokens/)?.[1];
+  assert.ok(reported, result);
+
+  // Dispatch 2 re-scans the compressed transcript: its measurement is tiny,
+  // so before the fix the ack reported that instead of the tool's figure.
+  const second = bigToolFixture();
+  await run(hook, second);
+  const ack = remindersOf(second);
+  assert.match(ack, /Prune applied \(b1\)/);
+  assert.ok(
+    ack.includes(`~${reported} tokens`),
+    `ack must quote the prune result's ~${reported} tokens, got: ${ack}`,
+  );
+  // Never the pre-prune number, and never the transcript-only undercount.
+  assert.ok(!ack.includes("150,000"), ack);
+});
+
+// Plugin reloads and server restarts rebuild the `UsageTracker`, so its prune
+// epoch (and with it `isStale`) is gone while the persisted state still owes
+// the ack. Gating the `usageAfter` floor on staleness made the hydrated record
+// dead and let the ack fall back to the messages-only measurement.
+test("the ack after a restart still quotes the prune tool's post-prune estimate", async () => {
+  const { store, mirror, deps, hook } = harness();
+
+  const tool = pruneToolDefinition({
+    store,
+    mirror,
+    logger: createLogger(false),
+    config: CONFIG,
+    getModelContextLimit: () => 200_000,
+    getUsageTokens: () => 150_000,
+    markPruned: (id) => deps.usage.markPruned(id),
+  });
+
+  await run(hook, bigToolFixture());
+  const pruned = await tool.execute(
+    {
+      topic: "Auth exploration",
+      content: [{ startId: "m0001", endId: "m0004", summary: "Explored auth." }],
+    },
+    { sessionID: SESSION },
+  );
+  const reported = String(pruned.content).match(/Context is now ~([\d,]+) tokens/)?.[1];
+  assert.ok(reported, String(pruned.content));
+
+  // Restart: a fresh tracker has no epoch, so `isStale` reports false even
+  // though `pruneSeq > pruneAckSeq` still owes the ack.
+  deps.usage = new UsageTracker();
+  assert.equal(deps.usage.isStale(SESSION), false);
+  const runtime = store.peek(SESSION)!;
+  assert.ok(runtime.state.pruneSeq > runtime.state.pruneAckSeq);
+
+  const second = bigToolFixture();
+  await run(hook, second);
+  const ack = remindersOf(second);
+  assert.match(ack, /Prune applied \(b1\)/);
+  assert.ok(
+    ack.includes(`~${reported} tokens`),
+    `ack must quote the prune result's ~${reported} tokens after a restart, got: ${ack}`,
+  );
+  assert.ok(!ack.includes("150,000"), ack);
 });
 
 // The ack must forward `lastCompression.messagesCovered`: while over budget,

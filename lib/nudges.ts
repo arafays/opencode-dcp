@@ -20,11 +20,13 @@ import type { WireMessage } from "./types"
  * pre-prune prompt. `UsageTracker.markPruned` zeroes that estimate and drops
  * the baseline so it cannot be re-published (the usage event arriving after a
  * prune still carries the pre-prune step's totals), and `UsageTracker.isStale`
- * flags the window where no post-prune delta exists yet - the hook then trusts
- * the measurement alone instead of maxing the stale number back in, otherwise
- * the model is re-nudged with the pre-prune percentage it just acted on. The
- * prune itself is answered once by `maybePruneAck`, which resolves the earlier
- * reminder and states whether another pass is warranted.
+ * flags the window where no post-prune delta exists yet. While a prune still
+ * owes its one-shot ack (`pruneSeq > pruneAckSeq` in persisted state, so the
+ * gate survives a restart where the tracker's epoch does not), the hook quotes
+ * the prune tool's own `usageAfter` record instead of maxing the stale number
+ * back in, otherwise the model is re-nudged with the pre-prune percentage it
+ * just acted on. The prune itself is answered once by `maybePruneAck`, which
+ * resolves the earlier reminder and states whether another pass is warranted.
  *
  * Rate limiting: at most one active reminder (nudge or ack) per
  * `nudgeFrequency` transcript messages; anchors clear when a compression

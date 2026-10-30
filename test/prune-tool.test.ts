@@ -940,6 +940,9 @@ test("prune reports post-prune occupancy in its usage note", async () => {
   // compression record's covered-minus-summaries delta.
   const reclaimed = Math.max(0, record.tokensBefore - record.tokensAfter);
   const expected = Math.round(((150_000 - reclaimed) / 200_000) * 100);
+  // The persisted record carries the exact figure the note printed, so the
+  // next dispatch's ack can repeat it instead of re-measuring the transcript.
+  assert.equal(runtime.state.stats.recentCompressions.at(-1)?.usageAfter, 150_000 - reclaimed);
   assert.ok(!String(result.content).startsWith("prune failed"), String(result.content));
   // The note leads with the MODEL WINDOW and names the budget only as a
   // trailing threshold, using the same `contextUsage`/`budgetClause` spellings
@@ -955,6 +958,74 @@ test("prune reports post-prune occupancy in its usage note", async () => {
     String(result.content),
     /Prune again only if another meaningfully sized closed section has appeared outside the active compressed sections; otherwise continue working/,
   );
+});
+
+test("a second prune in the same turn subtracts from the previous post-prune estimate", async () => {
+  // A model can emit several `prune` calls in one assistant message. The first
+  // call's `markPruned` zeroes the tracker, so the second reads 0 - it must
+  // base its post-prune figure on the record the first one just wrote instead
+  // of falling back to the transcript-only measurement.
+  const twoBigTurns = (): WireMessage[] => [
+    { id: "u1", role: "user", content: [{ type: "text", text: "explore auth" }] },
+    {
+      id: "a1",
+      role: "assistant",
+      content: [{ type: "tool-call", id: "c1", name: "read", input: { filePath: "a.ts" } }],
+    },
+    {
+      id: "t1",
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          id: "c1",
+          name: "read",
+          result: { type: "text", value: "auth route detail. ".repeat(400) },
+        },
+      ],
+    },
+    { id: "u2", role: "user", content: [{ type: "text", text: "now implement" }] },
+    {
+      id: "a2",
+      role: "assistant",
+      content: [{ type: "tool-call", id: "c2", name: "read", input: { filePath: "b.ts" } }],
+    },
+    {
+      id: "t2",
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          id: "c2",
+          name: "read",
+          result: { type: "text", value: "impl detail. ".repeat(400) },
+        },
+      ],
+    },
+  ];
+
+  let calls = 0;
+  const { store, index, run } = harness(
+    { getUsageTokens: () => (calls++ === 0 ? 150_000 : 0) },
+    twoBigTurns(),
+  );
+  const runtime = await store.ensure(SESSION);
+  runtime.refs.project(index.keys);
+
+  await run({
+    topic: "First",
+    content: [{ startId: "m0001", endId: "m0003", summary: "Explored auth." }],
+  });
+  const first = runtime.state.stats.recentCompressions[0]!;
+  assert.ok((first.usageAfter ?? 0) > 0);
+
+  await run({
+    topic: "Second",
+    content: [{ startId: "m0004", endId: "m0006", summary: "Implemented." }],
+  });
+  const second = runtime.state.stats.recentCompressions[1]!;
+  assert.ok(second.tokensSaved > 0);
+  assert.equal(second.usageAfter, first.usageAfter! - second.tokensSaved);
 });
 
 test("prune persists the compression record in the session stats", async () => {
