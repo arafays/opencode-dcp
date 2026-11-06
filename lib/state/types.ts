@@ -20,7 +20,7 @@ export interface CompressionBlock {
   coveredKeys: string[]
   /** Tool call IDs whose outputs were swallowed by the range. */
   coveredToolIds: string[]
-  /** Transcript key right after the covered range; synthetic summary splices in there. "tail" appends at the end. */
+  /** Key after the covered range. "tail" resolves after the last covered key, before later appended turns. */
   anchorKey: string
   /** Blocks fully consumed by this one (their summaries were folded in). */
   consumedBlockIds: number[]
