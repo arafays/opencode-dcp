@@ -2,7 +2,7 @@ import { ALWAYS_PROTECTED_TOOLS, type DcpOptions } from "./config"
 import { matchesGlob } from "./protected"
 import { formatMessageIdTag } from "./refs"
 import { activeBlocks, TAIL_ANCHOR } from "./state/store"
-import type { SessionState } from "./state/types"
+import type { CompressionBlock, SessionState } from "./state/types"
 import { createSyntheticBlockMessage, mapTextParts, stripHallucinatedTags, withToolInputReplaced, withToolResultReplaced } from "./transcript/edit"
 import { makeToolResultReplacement, qualifiedToolName, type WireMessage } from "./types"
 
@@ -84,11 +84,27 @@ export function pruneToolOutputs(
   }
 }
 
-/**
- * Applies active compression blocks: removes covered messages from the
- * outbound array and splices one synthetic summary user-message per block at
- * its anchor position ("tail" anchors append at the end).
- */
+/** Resolve the original compression boundary, not the end of each new dispatch. */
+export function compressionAnchorIndex(
+  block: CompressionBlock,
+  keyToIndex: ReadonlyMap<string, number>,
+  length: number,
+): number {
+  const successor = block.anchorKey === TAIL_ANCHOR ? undefined : keyToIndex.get(block.anchorKey)
+  if (successor !== undefined) return successor
+
+  // Covered raw messages remain in stored history, including for persisted
+  // "tail" blocks. Recover their original end so appending turns cannot move
+  // the summary, reorder the conversation, and invalidate the cached prefix.
+  let lastCovered = -1
+  for (const key of block.coveredKeys) {
+    const index = keyToIndex.get(key)
+    if (index !== undefined && index > lastCovered) lastCovered = index
+  }
+  return lastCovered < 0 ? length : lastCovered + 1
+}
+
+/** Replace covered messages with summaries at their fixed compression boundaries. */
 export function applyCompressionBlocks(state: SessionState, messages: WireMessage[], keys: string[]): void {
   const blocks = activeBlocks(state)
   if (blocks.length === 0) return
@@ -105,8 +121,7 @@ export function applyCompressionBlocks(state: SessionState, messages: WireMessag
 
   for (const block of blocks) {
     for (const key of block.coveredKeys) covered.add(key)
-    const anchorIndex =
-      block.anchorKey === TAIL_ANCHOR ? -2 : (keyToIndex.get(block.anchorKey) ?? -2)
+    const anchorIndex = compressionAnchorIndex(block, keyToIndex, messages.length)
     splices.push({ at: anchorIndex, summary: block.summary })
   }
 
@@ -120,7 +135,7 @@ export function applyCompressionBlocks(state: SessionState, messages: WireMessag
     if (key !== undefined && covered.has(key)) continue
     kept.push(messages[i]!)
   }
-  for (const splice of splices.filter((entry) => entry.at === -2)) {
+  for (const splice of splices.filter((entry) => entry.at === messages.length)) {
     kept.push(createSyntheticBlockMessage(splice.summary))
   }
 
