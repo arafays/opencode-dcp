@@ -365,7 +365,7 @@ test("normalizeLegacyBlockKeys leaves legacy keys alone when the index no longer
   assert.deepEqual(state.blocks["1"]!.coveredKeys, ["tool#9"]);
 });
 
-test("applyCompressionBlocks appends tail-anchored summaries at the end", () => {
+test("applyCompressionBlocks keeps tail summaries before later uncovered messages", () => {
   const { state, keys } = buildCompressedState();
   state.blocks["1"]!.anchorKey = "tail";
   const messages: WireMessage[] = [
@@ -375,8 +375,8 @@ test("applyCompressionBlocks appends tail-anchored summaries at the end", () => 
   ];
   applyCompressionBlocks(state, messages, keys);
   assert.equal(messages.length, 2);
-  assert.equal(messages[0]!.id, "t1");
-  assert.equal(messages[1]!.role, "user");
+  assert.equal(messages[0]!.role, "user");
+  assert.equal(messages[1]!.id, "t1");
 });
 
 test("injectBoundaryTags tags user texts and textual tool results only", () => {
