@@ -11,7 +11,7 @@ import type { Logger } from "./logger";
 import { PRUNE_RANGE } from "./prompts";
 import { formatBlockRef, parseBlockRef, parseMessageRef } from "./refs";
 import { applyCompression, activeBlocks, wrapCompressedSummary, TAIL_ANCHOR } from "./state/store";
-import { normalizeLegacyBlockKeys } from "./prune";
+import { compressionAnchorIndex, normalizeLegacyBlockKeys } from "./prune";
 import type { SessionRuntime, StateStore } from "./state/store";
 import type { CompressionBlock, SessionState } from "./state/types";
 import { countTokens } from "./tokens";
@@ -555,15 +555,17 @@ function resolvePlans(
   index.keys.forEach((key, i) => keyToIndex.set(key, i));
   const blocks = activeBlocks(runtime.state);
   const hidden = new Set(blocks.flatMap((block) => block.coveredKeys));
+  const anchors = blocks.map((block) => ({
+    block,
+    at: compressionAnchorIndex(block, keyToIndex, index.keys.length),
+  }));
   const visible: Array<{ key: string } | { block: CompressionBlock }> = [];
-  for (const key of index.keys) {
-    for (const block of blocks) {
-      if (block.anchorKey === key) visible.push({ block });
+  for (let i = 0; i <= index.keys.length; i++) {
+    for (const anchor of anchors) {
+      if (anchor.at === i) visible.push({ block: anchor.block });
     }
-    if (!hidden.has(key)) visible.push({ key });
-  }
-  for (const block of blocks) {
-    if (!keyToIndex.has(block.anchorKey)) visible.push({ block });
+    const key = index.keys[i];
+    if (key !== undefined && !hidden.has(key)) visible.push({ key });
   }
   const keyToPosition = new Map<string, number>();
   const blockToPosition = new Map<number, number>();
